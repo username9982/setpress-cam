@@ -19,7 +19,7 @@
   #work { display: flex; flex: 1; min-height: 0; }
   #stage { position: relative; flex: 1; min-width: 0; min-height: 0; }
 </style>
-<link rel="stylesheet" href="style.css?v=0.2.1">
+<link rel="stylesheet" href="style.css?v=0.3.0">
 <!-- ?v= は tools/bump_version.py で書き換える。古い style.css・app.js と組み合わさらないようにするため -->
 </head>
 <body>
@@ -45,6 +45,7 @@
       </select> mm</label>
   </div>
   <div class="group right">
+    <button id="btn-tools">金型</button>
     <button id="btn-new">新規</button>
     <button id="btn-open">開く</button>
     <button id="btn-save" class="primary">保存</button>
@@ -76,6 +77,8 @@
 
 <footer id="status">
   <span id="st-name">名前なし</span>
+  <span id="st-prog"></span>
+  <span id="st-tools"></span>
   <span id="st-count"></span>
   <span id="st-pos"></span>
   <span id="st-msg"></span>
@@ -89,6 +92,22 @@
     <div class="dlg-buttons">
       <button type="button" id="save-cancel">キャンセル</button>
       <button value="ok" class="primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-project">
+  <form id="project-form" novalidate>
+    <h2 id="project-title">新規作成</h2>
+    <label class="prog">プログラム番号 O
+      <input id="program-no" type="number" inputmode="numeric" min="1" max="9999" step="1" placeholder="1〜9999">
+    </label>
+    <div class="tools-head">使用する金型</div>
+    <div id="tool-rows"></div>
+    <p id="project-err" class="err" role="alert"></p>
+    <div class="dlg-buttons">
+      <button type="button" id="project-cancel">キャンセル</button>
+      <button type="submit" class="primary" id="project-ok">作成</button>
     </div>
   </form>
 </dialog>
@@ -116,6 +135,6 @@
   </form>
 </dialog>
 
-<script src="app.js?v=0.2.1"></script>
+<script src="app.js?v=0.3.0"></script>
 </body>
 </html>

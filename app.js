@@ -3,7 +3,7 @@
 // セットプレス CAM — 動作確認版: 四角形を描いて保存する。
 // 座標はすべて mm。原点は板の左下、Y は上向き（機械の座標に合わせる）。
 
-const APP_VERSION = '0.2.1';
+const APP_VERSION = '0.3.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -12,9 +12,50 @@ const canvas = $('canvas');
 const ctx = canvas.getContext('2d');
 
 // ---- 図面データ ----
+// 金型の形: 長方形（幅・高さ）、丸（直径）、異形（外形の幅・高さとメモ）、使わない
+const SHAPES = {
+  rect: '長方形',
+  round: '丸',
+  special: '異形',
+  none: '使わない',
+};
+const TOOL_COUNT = 3;  // T1〜T3
+const PROGRAM_MIN = 1, PROGRAM_MAX = 9999;
+
+function emptyTool() { return { shape: 'none', w: null, h: null, d: null, note: '' }; }
 function newDoc() {
-  return { version: 1, name: '', sheet: { w: 1000, h: 500 }, rects: [] };
+  return {
+    version: 2,
+    name: '',
+    program: null,  // プログラム番号
+    tools: Array.from({ length: TOOL_COUNT }, emptyTool),
+    sheet: { w: 1000, h: 500 },
+    rects: [],
+  };
 }
+function posNum(v) {
+  const n = Number(v);
+  return v !== null && v !== '' && Number.isFinite(n) && n > 0 ? round(n) : null;
+}
+// 保存データの金型を整える（古い図面には金型が無い）
+function normalizeTools(tools) {
+  return Array.from({ length: TOOL_COUNT }, (unused, i) => {
+    const t = (Array.isArray(tools) && tools[i]) || {};
+    return {
+      shape: SHAPES[t.shape] ? t.shape : 'none',
+      w: posNum(t.w), h: posNum(t.h), d: posNum(t.d),
+      note: String(t.note || '').slice(0, 40),
+    };
+  });
+}
+// 金型の説明（例: "長方形 20 x 10"、"丸 φ8"）
+function toolText(t) {
+  if (t.shape === 'rect') return `長方形 ${t.w} x ${t.h}`;
+  if (t.shape === 'round') return `丸 φ${t.d}`;
+  if (t.shape === 'special') return `異形 ${t.w} x ${t.h}${t.note ? ` (${t.note})` : ''}`;
+  return '使わない';
+}
+function programText(p) { return p == null ? 'O----' : 'O' + String(p).padStart(4, '0'); }
 let doc = newDoc();
 let selectedId = null;
 let nextId = 1;
@@ -335,6 +376,9 @@ function updateUi() {
   $('sheet-h').value = doc.sheet.h;
   $('st-name').textContent = (doc.name || '名前なし') + (dirty ? ' *' : '');
   $('st-count').textContent = `四角形 ${doc.rects.length} 個`;
+  $('st-prog').textContent = doc.program == null ? 'プログラム番号なし' : programText(doc.program);
+  $('st-tools').textContent = doc.tools.map((t, i) => (t.shape === 'none' ? null : `T${i + 1} ${toolText(t)}`))
+    .filter(Boolean).join('　') || '金型なし';
   updateProps();
   renderCode();
 }
@@ -349,6 +393,8 @@ function genCode() {
   const add = (text, rectId, comment = false) => lines.push({ text, rectId, comment });
   add(`; セットプレス CAM v${APP_VERSION}（仮の形式）`, null, true);
   add(`; 図面 ${doc.name || '名前なし'}  板 ${fmt(doc.sheet.w)} x ${fmt(doc.sheet.h)} mm`, null, true);
+  add(programText(doc.program), null);
+  doc.tools.forEach((t, i) => add(`; T${i + 1} ${toolText(t)}`, null, true));
   add('G21 G90', null);
   let n = 10;
   const nl = (s, id) => { add(`N${n} ${s}`, id); n += 10; };
@@ -483,9 +529,12 @@ function confirmBox(text, okLabel = 'OK') {
 
 function loadDoc(d) {
   if (!d || !d.sheet || !Array.isArray(d.rects)) throw new Error('図面の形式が違います');
+  const prog = Number(d.program);
   doc = {
-    version: 1,
+    version: 2,
     name: String(d.name || ''),
+    program: Number.isInteger(prog) && prog >= PROGRAM_MIN && prog <= PROGRAM_MAX ? prog : null,
+    tools: normalizeTools(d.tools),
     sheet: { w: Number(d.sheet.w) || 1000, h: Number(d.sheet.h) || 500 },
     rects: d.rects.map((r, i) => ({ id: i + 1, x: Number(r.x), y: Number(r.y), w: Number(r.w), h: Number(r.h) }))
       .filter((r) => [r.x, r.y, r.w, r.h].every(Number.isFinite) && r.w > 0 && r.h > 0),
@@ -545,7 +594,8 @@ function renderOpenList() {
     info.textContent = name;
     const small = document.createElement('small');
     const d = new Date(item.savedAt);
-    small.textContent = `${d.toLocaleString('ja-JP')}・四角形 ${item.doc.rects.length} 個・${item.doc.sheet.w}×${item.doc.sheet.h} mm`;
+    const prog = item.doc.program != null ? `${programText(item.doc.program)}・` : '';
+    small.textContent = `${prog}${d.toLocaleString('ja-JP')}・四角形 ${item.doc.rects.length} 個・${item.doc.sheet.w}×${item.doc.sheet.h} mm`;
     info.append(small);
     const open = document.createElement('button');
     open.type = 'button';
@@ -574,11 +624,114 @@ function renderOpenList() {
 }
 $('btn-open').addEventListener('click', () => { renderOpenList(); $('dlg-open').showModal(); });
 
+// ---- プログラム番号と金型（新規作成のとき・「金型」ボタン） ----
+// 新規: いまの図面の金型と板の大きさを初めの値にする（同じ金型を続けて使うことが多いため）
+let projectMode = 'new';
+
+function buildToolRows() {
+  const box = $('tool-rows');
+  box.textContent = '';
+  for (let i = 0; i < TOOL_COUNT; i++) {
+    const row = document.createElement('div');
+    row.className = 'tool-row';
+    row.dataset.i = i;
+    const opts = Object.entries(SHAPES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+    // 形ごとの入力欄を全部作っておき、選んだ形の欄だけ見せる（形を切り替えても入れた値が残る）
+    row.innerHTML = `
+      <span class="tno">T${i + 1}</span>
+      <select class="shape" aria-label="T${i + 1} の形">${opts}</select>
+      <span class="dims" data-for="rect">
+        <label>幅 <input class="w" type="number" inputmode="decimal" step="any" min="0.01"></label>
+        <label>高さ <input class="h" type="number" inputmode="decimal" step="any" min="0.01"></label> mm
+      </span>
+      <span class="dims" data-for="round">
+        <label>直径 φ <input class="d" type="number" inputmode="decimal" step="any" min="0.01"></label> mm
+      </span>
+      <span class="dims" data-for="special">
+        <label>幅 <input class="w" type="number" inputmode="decimal" step="any" min="0.01"></label>
+        <label>高さ <input class="h" type="number" inputmode="decimal" step="any" min="0.01"></label> mm
+        <label class="note">メモ <input class="note" type="text" maxlength="40" placeholder="形の説明"></label>
+      </span>`;
+    row.querySelector('.shape').addEventListener('change', () => showDims(row));
+    box.append(row);
+  }
+}
+function showDims(row) {
+  const shape = row.querySelector('.shape').value;
+  row.querySelectorAll('.dims').forEach((s) => { s.hidden = s.dataset.for !== shape; });
+}
+
+function openProjectDialog(mode) {
+  projectMode = mode;
+  $('project-title').textContent = mode === 'new' ? '新規作成' : 'プログラム番号と金型';
+  $('project-ok').textContent = mode === 'new' ? '作成' : '決定';
+  $('project-err').textContent = '';
+  $('program-no').value = mode === 'new' ? '' : (doc.program ?? '');
+  doc.tools.forEach((t, i) => {
+    const row = $('tool-rows').children[i];
+    row.querySelector('.shape').value = t.shape;
+    row.querySelectorAll('input.w').forEach((el) => { el.value = t.w ?? ''; });
+    row.querySelectorAll('input.h').forEach((el) => { el.value = t.h ?? ''; });
+    row.querySelector('input.d').value = t.d ?? '';
+    row.querySelector('input.note').value = t.note;
+    showDims(row);
+  });
+  $('dlg-project').showModal();
+  if (mode === 'new') $('program-no').focus();
+}
+
+// 入力を確かめて {program, tools} を返す。だめなら理由の文字列を返す。
+function readProjectDialog() {
+  const p = Number($('program-no').value);
+  if (!Number.isInteger(p) || p < PROGRAM_MIN || p > PROGRAM_MAX) {
+    return `プログラム番号は ${PROGRAM_MIN}〜${PROGRAM_MAX} の整数で入れてください。`;
+  }
+  const tools = [];
+  for (const row of $('tool-rows').children) {
+    const no = `T${Number(row.dataset.i) + 1}`;
+    const shape = row.querySelector('.shape').value;
+    const dims = row.querySelector(`.dims[data-for="${shape}"]`);
+    const val = (cls) => posNum(dims.querySelector(`input.${cls}`).value);
+    const t = emptyTool();
+    t.shape = shape;
+    if (shape === 'rect' || shape === 'special') {
+      t.w = val('w'); t.h = val('h');
+      if (t.w == null || t.h == null) return `${no} の幅と高さを入れてください（0 より大きい数）。`;
+      if (shape === 'special') t.note = dims.querySelector('input.note').value.trim();
+    } else if (shape === 'round') {
+      t.d = val('d');
+      if (t.d == null) return `${no} の直径を入れてください（0 より大きい数）。`;
+    }
+    tools.push(t);
+  }
+  if (tools.every((t) => t.shape === 'none')) return '金型を 1 つ以上選んでください。';
+  return { program: p, tools };
+}
+
+$('project-cancel').addEventListener('click', () => $('dlg-project').close('cancel'));
+$('project-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const r = readProjectDialog();
+  if (typeof r === 'string') { $('project-err').textContent = r; return; }
+  $('dlg-project').close('ok');
+  if (projectMode === 'new') {
+    const sheet = { ...doc.sheet };  // 板の大きさは引き継ぐ
+    loadDoc({ ...newDoc(), sheet, program: r.program, tools: r.tools });
+    flash(`${programText(r.program)} を作りました`);
+  } else {
+    snapshot();
+    doc.program = r.program;
+    doc.tools = r.tools;
+    changed();
+  }
+});
+
 $('btn-new').addEventListener('click', async () => {
   if (dirty && !(await confirmBox('いまの図面は保存されていません。破棄して新しく始めますか？', '新規'))) return;
-  const sheet = { ...doc.sheet };  // 板の大きさは引き継ぐ
-  loadDoc({ ...newDoc(), sheet });
+  openProjectDialog('new');
 });
+$('btn-tools').addEventListener('click', () => openProjectDialog('edit'));
+buildToolRows();
 
 // ファイルへの書き出し・読み込み（バックアップや別の端末へ移すため）
 $('btn-export').addEventListener('click', () => {
@@ -629,6 +782,7 @@ window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault()
   } catch (e) { /* 壊れていたら新しく始める */ }
   updateUi();
   resize();
+  openProjectDialog('new');  // 初めて開いたときは、プログラム番号と金型から決める
 })();
 
 if ('serviceWorker' in navigator) {
