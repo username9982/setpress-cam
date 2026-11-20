@@ -187,6 +187,7 @@ input[type=number], input[type=text], select {
 #props .props-row .pl { min-width: 8em; max-width: 12em; }
 #props .props-row input { width: 100px; }
 #props .props-row .unit { color: #667; font-size: 14px; }
+#props .props-row .ok { min-height: 36px; padding: 0 10px; font-size: 14px; }  /* そのままの値でも決められる */
 #props .props-row .badge { min-width: 2.5em; font-size: 12px; font-weight: 700; color: #7a4fb3; }
 #props .props-note { max-width: 300px; }
 .props-buttons { display: flex; gap: 8px; }

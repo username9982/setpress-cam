@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.17.1';
+const APP_VERSION = '0.17.2';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1008,11 +1008,20 @@ function updateProps() {
     opt.rows.forEach((r, i) => {
       const lab = document.createElement('label');
       lab.className = 'props-row';
-      lab.innerHTML = `<span class="pl"></span><input type="number" inputmode="decimal" step="any" data-i="${i}"><span class="unit">mm</span><span class="badge"></span>`;
+      lab.innerHTML = `<span class="pl"></span><input type="number" inputmode="decimal" step="any" data-i="${i}"><span class="unit">mm</span><button type="button" class="ok">決定</button><span class="badge"></span>`;
       lab.querySelector('.pl').textContent = r.label;
       const input = lab.querySelector('input');
-      input.addEventListener('change', () => commitDim(i, input));
-      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } });
+      // 値を変えたとき（change）だけでなく、そのままの値でも Enter か「決定」で寸法にできる。
+      // 同じ入力で 2 度決めないように、決めたら次に触るまで止める
+      let done = false;
+      const go = () => { if (done) return; done = true; commitDim(i, input); };
+      input.addEventListener('focus', () => { done = false; });
+      input.addEventListener('input', () => { done = false; });
+      input.addEventListener('change', go);
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); input.blur(); } });
+      const ok = lab.querySelector('.ok');
+      ok.addEventListener('pointerdown', (e) => e.preventDefault());  // 入力欄からフォーカスを外さない（外すと change で先に決まる）
+      ok.addEventListener('click', (e) => { e.preventDefault(); done = false; go(); });
       box.append(lab);
     });
     const note = document.createElement('div');
@@ -1031,7 +1040,7 @@ function updateProps() {
   }
   box.querySelector('.props-title').textContent = opt.title;
   box.querySelector('.props-note').textContent = opt.note ||
-    (opt.rows.length ? '数字を入れて Enter で決まります。紫の数字は決めた寸法。' : '');
+    (opt.rows.length ? '数字を入れて Enter か「決定」で決まります。いまの値のままでも決められます。紫の「寸法」は決めた寸法。' : '');
   opt.rows.forEach((r, i) => {
     const input = box.querySelector(`input[data-i="${i}"]`);
     if (r.kind === 'sheet') {
