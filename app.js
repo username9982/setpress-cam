@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.16.2';
+const APP_VERSION = '0.16.3';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1371,20 +1371,30 @@ function f13Singles(h) {
   if (!t || !h.mj || Math.abs(t.w - t.h) < 1e-6) return [];
   const out = [];
   const mj = h.mj;
-  // 並べる向きの金型寸法 len で、区間 [a, b] を端から端まで覆う位置（両端にそろえ、間は等しく重ねる）
+  const r = f13R(h);
+  // 重ねる量: 送りの向きの金型寸法の約 1/3（0.1 mm に丸める）。F13 で抜く帯の側へ伸ばす
+  // （ミクロジョイントの側は抜かない所なので伸ばさない）。帯の半分より長くはしない
+  const ovOf = (len, strip) => Math.min(Math.max(0.1, Math.round(len / 3 * 10) / 10), Math.max(0, strip / 2));
+  // 並べる向きの金型寸法 len で、区間 [a, b] を端から端まで覆う位置。両端にそろえ、
+  // 単発どうしも約 1/3 以上重なるように数を決め、間は等しく重ねる
   const spots = (a, b, len) => {
-    const n = Math.max(1, Math.ceil((b - a) / len - 1e-6));
-    return Array.from({ length: n }, (_, i) => (n === 1 ? a : a + (b - a - len) * i / (n - 1)));
+    const step = len - len / 3;
+    const n = b - a <= len + 1e-6 ? 1 : 1 + Math.ceil((b - a - len) / step - 1e-6);
+    if (n === 1) return [a];
+    const gap = Math.floor((b - a - len) / (n - 1) * 10 + 1e-6) / 10;  // 0.1 mm 刻み（切り捨てなので重なりは減らない）
+    return Array.from({ length: n }, (_, i) => (i === n - 1 ? b - len : a + gap * i));
   };
   if (t.w > t.h) {
     // 左右の帯（縦に送る、送りの向きの寸法は t.h）の、角に近い所に余りが残る
-    const ranges = [[h.y1 - t.w - mj, h.y1 - t.h - mj], [h.y0 + t.h + mj, h.y0 + t.w + mj]];
+    const ov = ovOf(t.h, (h.y1 - h.y0) - 2 * r);
+    const ranges = [[h.y1 - t.w - mj - ov, h.y1 - t.h - mj], [h.y0 + t.h + mj, h.y0 + t.w + mj + ov]];
     for (const xs of [h.x0, h.x1 - t.w]) {
       for (const [a, b] of ranges) for (const y of spots(a, b, t.h)) out.push({ x0: xs, x1: xs + t.w, y0: y, y1: y + t.h });
     }
   } else {
     // 上下の帯（横に送る、送りの向きの寸法は t.w）
-    const ranges = [[h.x0 + t.w + mj, h.x0 + t.h + mj], [h.x1 - t.h - mj, h.x1 - t.w - mj]];
+    const ov = ovOf(t.w, (h.x1 - h.x0) - 2 * r);
+    const ranges = [[h.x0 + t.w + mj, h.x0 + t.h + mj + ov], [h.x1 - t.h - mj - ov, h.x1 - t.w - mj]];
     for (const ys of [h.y1 - t.h, h.y0]) {
       for (const [a, b] of ranges) for (const x of spots(a, b, t.w)) out.push({ x0: x, x1: x + t.w, y0: ys, y1: ys + t.h });
     }
@@ -1550,7 +1560,7 @@ function genCode() {
       if (h.tool != null && h.tool !== curTool) { add(`T${h.tool + 1}`, hk); curTool = h.tool; }
       if (f13) {
         const singles = f13Singles(h);
-        if (singles.length) add('; 単発（短いほうの辺のつながりを、ミクロジョイントの長さまで先に抜く）  金型の中心', hk, true);
+        if (singles.length) add('; 単発（短いほうの辺のつながりを、ミクロジョイントの長さまで先に抜く。F13 の帯と約 1/3 重ねる）  金型の中心', hk, true);
         for (const q of singles) add(xy((q.x0 + q.x1) / 2 - o.x, o.y - (q.y0 + q.y1) / 2, '単発 中心'), hk);
       }
       add(macroOf(h), hk);
