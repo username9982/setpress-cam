@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.9.0';
+const APP_VERSION = '0.10.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -81,10 +81,37 @@ function undo() {
   changed();
 }
 function changed() {
+  applyPlacements();
   dirty = true;
   saveCurrent();
   refresh();
 }
+// 板の原点からの寸法（kind 'sheet'）に合わせて、外形を穴・切り欠き・つながった線ごと平行移動する。
+// 値は板の左上から右へ X+、下へ Y+。寸法の b は外形の点で、その点が属する外形を動かす。
+function applyPlacements() {
+  const sd = doc.dims.filter((d) => d.kind === 'sheet');
+  if (!sd.length) return;
+  const a = Geo.analyze(doc);
+  const shift = new Map();
+  for (const d of sd) {
+    const k = a.owner.get(d.b);
+    if (k == null) continue;
+    const o = a.outers[k].origin;
+    const sh = shift.get(k) || { x: 0, y: 0 };
+    if (d.axis === 'x') sh.x = d.value - o.x; else sh.y = (doc.sheet.h - d.value) - o.y;
+    shift.set(k, sh);
+  }
+  for (const p of doc.points) {
+    const sh = shift.get(a.owner.get(p.id));
+    if (sh) { p.x = round(p.x + sh.x); p.y = round(p.y + sh.y); }
+  }
+}
+// 外形の原点の、板の原点からの位置（右へ X+、下へ Y+）
+function sheetPos(k, axis) {
+  const o = info.outers[k].origin;
+  return round(axis === 'x' ? o.x : doc.sheet.h - o.y);
+}
+function sheetDimOf(k, axis) { return doc.dims.find((d) => d.kind === 'sheet' && d.axis === axis && info.owner.get(d.b) === k); }
 function refresh() {
   info = Geo.analyze(doc);
   shapes = info.shapes;
@@ -104,7 +131,10 @@ const D = (id) => doc.dims.find((d) => d.id === id);
 const sheetTopLeft = () => ({ x: 0, y: doc.sheet.h });
 function originAt(x, y) { const k = info.outerAt(x, y); return k == null ? sheetTopLeft() : info.outers[k].origin; }
 function rel(o, x, y) { return { x: round(x - o.x), y: round(o.y - y) }; }
-function elemExists(s) { return s.t === 'point' ? !!P(s.id) : s.t === 'line' ? !!L(s.id) : !!D(s.id); }
+function elemExists(s) {
+  if (s.t === 'origin') return s.id < info.outers.length;
+  return s.t === 'point' ? !!P(s.id) : s.t === 'line' ? !!L(s.id) : !!D(s.id);
+}
 function dropMissingSelection() { sel = sel.filter(elemExists); }
 function isSel(t, id) { return sel.some((s) => s.t === t && s.id === id); }
 
@@ -167,6 +197,7 @@ const COLOR = {
   fill: 'rgba(47, 128, 209, 0.18)',  // 閉じた図形の内側
 };
 let dimHits = [];  // 寸法の数字の位置（タップ用）[{id, x, y, w, h}]
+let originHits = [];  // 外形の原点の名前の位置（タップ用）[{id: 外形の番号, x, y, w, h}]
 
 function gridStep() {
   // 線の間隔が 8px 以上になる 1-2-5 系列の間隔
@@ -206,12 +237,16 @@ function draw() {
   ctx.font = '13px sans-serif';
   ctx.fillStyle = '#4a5a6a';
   ctx.textAlign = 'left';
-  ctx.fillText(`板 ${w} × ${h} mm`, x0, y0 - 8);
+  ctx.textAlign = 'right';
+  ctx.fillText(`板 ${w} × ${h} mm`, x0 + sw, y0 - 8);
+  ctx.textAlign = 'left';
+  drawSheetOrigin();
 
   // 閉じた図形の塗り → 寸法 → 線 → 点 → 原点 の順に重ねる
   drawFills();
   dimHits = [];
-  layoutDims().forEach((lv, i) => drawDim(doc.dims[i], lv));
+  originHits = [];
+  layoutDims().forEach((lv, i) => { if (doc.dims[i].kind === 'sheet') drawSheetDim(doc.dims[i]); else drawDim(doc.dims[i], lv); });
   for (const l of doc.lines) drawLine(l);
   for (const p of doc.points) drawPoint(p);
   info.outers.forEach((fr, k) => drawOrigin(fr.origin, k));
@@ -281,10 +316,57 @@ function drawOrigin(o, k) {
   ctx.beginPath(); ctx.moveTo(x - 14, y); ctx.lineTo(x + 14, y); ctx.moveTo(x, y - 14); ctx.lineTo(x, y + 14); ctx.stroke();
   ctx.font = 'bold 13px sans-serif';
   ctx.textAlign = 'left';
-  ctx.fillText(`S${k + 1} 原点`, x + 12, y - 10);
+  const label = `S${k + 1} 原点`;
+  const sl = isSel('origin', k);
+  ctx.fillStyle = sl ? COLOR.selected : COLOR.origin;
+  ctx.fillText(label, x + 12, y - 10);
+  if (sl) {
+    ctx.strokeStyle = COLOR.selected;
+    ctx.beginPath(); ctx.arc(x, y, 13, 0, Math.PI * 2); ctx.stroke();
+  }
+  originHits.push({ id: k, x: x + 8, y: y - 26, w: ctx.measureText(label).width + 8, h: 22 });
 }
+// 板の原点（板の左上）。外形の原点の位置は、ここから右へ X+、下へ Y+ で測る
+function drawSheetOrigin() {
+  const [x, y] = toScreen(0, doc.sheet.h);
+  ctx.strokeStyle = COLOR.origin;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x - 8, y); ctx.lineTo(x + 8, y); ctx.moveTo(x, y - 8); ctx.lineTo(x, y + 8); ctx.stroke();
+}
+
+// 板の原点から外形の原点までの寸法。X は板の上の辺の外側、Y は左の辺の外側に引く
+function drawSheetDim(d) {
+  const k = info.owner.get(d.b);
+  if (k == null) return;
+  const o = info.outers[k].origin;
+  const s = isSel('dim', d.id);
+  const col = s ? COLOR.selected : COLOR.dim;
+  // 同じ向きの板の原点からの寸法を、外へ段にして並べる
+  const n = doc.dims.filter((q) => q.kind === 'sheet' && q.axis === d.axis && q.id < d.id).length;
+  const gap = (22 + 26 * n) / view.scale;
+  const h = doc.sheet.h;
+  let p1, p2, e;
+  if (d.axis === 'x') { p1 = [0, h + gap]; p2 = [o.x, h + gap]; e = [o.x, o.y]; }
+  else { p1 = [-gap, h]; p2 = [-gap, o.y]; e = [o.x, o.y]; }
+  const S = (q) => toScreen(q[0], q[1]);
+  const [s1, s2, f] = [S(p1), S(p2), S(e)];
+  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.2;
+  ctx.setLineDash([2, 3]);
+  ctx.beginPath(); ctx.moveTo(f[0], f[1]); ctx.lineTo(s2[0], s2[1]);
+  const c0 = S([0, h]);
+  ctx.moveTo(c0[0], c0[1]); ctx.lineTo(s1[0], s1[1]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke();
+  for (const [p, q] of [[s1, s2], [s2, s1]]) arrow(p, q);
+  dimLabel(d, s1, s2, s, col);
+}
+
 // 原点からの寸法の表示の値（Y は下へ正）
-function dimShown(d) { return d.kind === 'o' ? (d.axis === 'y' ? -d.value : d.value) : Math.abs(d.value); }
+function dimShown(d) {
+  if (d.kind === 'sheet') return d.value;  // 板の原点からの距離（右へ X+、下へ Y+）で持っている
+  return d.kind === 'o' ? (d.axis === 'y' ? -d.value : d.value) : Math.abs(d.value);
+}
 
 // 寸法線を置く位置（寸法線と直角な方向の座標、mm）を決める。
 // 線の長さは、その線のすぐ外側（つながった線と反対の側）。
@@ -296,6 +378,7 @@ function layoutDims() {
   const step = 30 / view.scale;
   const count = { x: 0, y: 0 };
   return doc.dims.map((d) => {
+    if (d.kind === 'sheet') return null;  // 板の外側に別に描く
     if (d.kind === 'len') {
       const l = L(d.refs[0].id);
       const across = l.dir === 'h' ? 'y' : 'x';
@@ -346,7 +429,10 @@ function drawDim(d, level) {
   ctx.setLineDash([]);
   ctx.beginPath(); ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke();
   for (const [p, q] of [[s1, s2], [s2, s1]]) arrow(p, q);
-  // 数字
+  dimLabel(d, s1, s2, s, col);
+}
+// 寸法の数字（白い箱）。タップ用に位置を覚える
+function dimLabel(d, s1, s2, s, col) {
   const text = `${round(dimShown(d))}`;
   ctx.font = 'bold 13px sans-serif';
   const tw = ctx.measureText(text).width + 10, th = 20;
@@ -497,6 +583,10 @@ function commitStroke(raw) {
 // ---- 当たり判定 ----
 function hitTest(sx, sy) {
   const [wx, wy] = toWorld(sx, sy);
+  // 外形の原点は、名前（S1 原点）をタップして選ぶ（印は角の点と重なるため）
+  for (const b of originHits) {
+    if (sx >= b.x - 4 && sx <= b.x + b.w + 4 && sy >= b.y - 4 && sy <= b.y + b.h + 4) return { t: 'origin', id: b.id };
+  }
   const p = nearestPoint(wx, wy, 16);
   if (p) return { t: 'point', id: p.id };
   for (let i = dimHits.length - 1; i >= 0; i--) {
@@ -590,7 +680,7 @@ canvas.addEventListener('pointermove', (e) => {
     // 「移動」で点か線を押したまま 8px 動いたら、選んだものをまとめて動かし始める。
     // 選んでいないものをつかんだときは、それだけを選び直して動かす
     const h = drag.hit;
-    if (mode === 'move' && h && h.t !== 'dim' && Math.hypot(pos[0] - drag.start[0], pos[1] - drag.start[1]) > 8) {
+    if (mode === 'move' && h && h.t !== 'dim' && h.t !== 'origin' && Math.hypot(pos[0] - drag.start[0], pos[1] - drag.start[1]) > 8) {
       if (!isSel(h.t, h.id)) sel = [h];
       snapshot();
       drag = {
@@ -611,6 +701,7 @@ canvas.addEventListener('pointermove', (e) => {
     for (const [tx, ty] of tries) {
       if (Geo.moveItems(doc, drag.items, tx, ty)) { drag.last = [tx, ty]; break; }
     }
+    applyPlacements();  // 板の原点から位置を決めた外形は、その位置に保つ
     refresh();  // 外形の原点や塗りも動かしながら描き直す
     // 画面の Y は上が正なので、表示は下へ正にそろえる
     $('st-pos').textContent = `移動  X ${round(drag.last[0])}  Y ${round(-drag.last[1])}`;
@@ -646,7 +737,7 @@ canvas.addEventListener('pointercancel', endPointer);
 // 「移動」ではいくつでも選べる（タップで足す・外す）。寸法の数字は選ばない。何もない所で全部外す。
 function tapSelectMany(hit) {
   if (!hit) sel = [];
-  else if (hit.t === 'dim') return;
+  else if (hit.t === 'dim' || hit.t === 'origin') return;
   else if (isSel(hit.t, hit.id)) sel = sel.filter((s) => !(s.t === hit.t && s.id === hit.id));
   else sel = [...sel, hit];
   updateUi();
@@ -655,7 +746,7 @@ function tapSelectMany(hit) {
 function tapSelect(hit) {
   if (!hit) sel = [];
   else if (isSel(hit.t, hit.id)) sel = sel.filter((s) => !(s.t === hit.t && s.id === hit.id));
-  else if (hit.t === 'dim' || sel.some((s) => s.t === 'dim') || sel.length >= 2) sel = [hit];
+  else if (hit.t === 'dim' || hit.t === 'origin' || sel.some((s) => s.t === 'dim' || s.t === 'origin') || sel.length >= 2) sel = [hit];
   else sel = [...sel, hit];
   updateUi();
   draw();
@@ -720,8 +811,23 @@ function dimOptions() {
   };
   // 線の長さは左・上の端を残す
   const lenPrefer = (axis, a, b) => (axis === 'x' ? (P(a).x <= P(b).x ? 'b' : 'a') : (P(a).y >= P(b).y ? 'b' : 'a'));
+  // 板の原点から外形の原点までの寸法の欄
+  const sheetRows = (k) => ['x', 'y'].map((axis) => {
+    const ref = info.outers[k].ref.x;
+    return { label: `板の原点から ${axisName(axis)}`, axis, a: ref, b: ref, kind: 'sheet', refs: [{ t: 'point', id: ref }], sheet: k, signed: true };
+  });
   if (sel.length === 1) {
     const s = sel[0];
+    if (s.t === 'origin') {
+      return { title: `S${s.id + 1} の原点（外形の左上）`, rows: sheetRows(s.id), isOrigin: true,
+        note: '板の原点（板の左上）から、右へ X、下へ Y の距離を入れると、外形ごと動きます。' };
+    }
+    if (s.t === 'dim' && D(s.id).kind === 'sheet') {
+      const d = D(s.id);
+      const k = info.owner.get(d.b);
+      if (k == null) return { title: `寸法 D${d.id}`, rows: [], note: '外形が閉じていないので、この寸法は効いていません。', isDim: true };
+      return { title: `寸法 D${d.id}（S${k + 1} の原点）`, rows: sheetRows(k).filter((r) => r.axis === d.axis), isDim: true };
+    }
     if (s.t === 'line') {
       const l = L(s.id);
       const along = l.dir === 'h' ? 'x' : 'y', across = l.dir === 'h' ? 'y' : 'x';
@@ -751,6 +857,7 @@ function dimOptions() {
   }
   if (sel.length === 2) {
     const [f, g] = sel;
+    if (f.t === 'origin' || g.t === 'origin') return { title: '', rows: [] };
     const prefer = 'b';  // 2 つ目に選んだ側が動く
     const kind = null, signed = false;
     if (f.t === 'point' && g.t === 'point') {
@@ -821,6 +928,11 @@ function updateProps() {
     (opt.rows.length ? '数字を入れて Enter で決まります。紫の数字は決めた寸法。' : '');
   opt.rows.forEach((r, i) => {
     const input = box.querySelector(`input[data-i="${i}"]`);
+    if (r.kind === 'sheet') {
+      if (document.activeElement !== input) input.value = sheetPos(r.sheet, r.axis);
+      input.parentElement.querySelector('.badge').textContent = sheetDimOf(r.sheet, r.axis) ? '寸法' : '';
+      return;
+    }
     const cur = P(r.b)[r.axis] - P(r.a)[r.axis];
     const existing = findDim(r.axis, r.refs, r.kind);
     if (document.activeElement !== input) input.value = round(r.signed ? (r.neg ? -cur : cur) : Math.abs(cur));
@@ -839,6 +951,17 @@ function commitDim(i, input) {
   v = round(v);
   if (!r.signed && v < 0) v = -v;
   if (r.kind === 'len' && v <= 0) { flash('長さは 0 より大きくしてください'); updateUi(); return; }
+  if (r.kind === 'sheet') {
+    // 板の原点から外形の原点までの寸法: 値を覚えて、外形ごと平行移動する
+    snapshot();
+    const existing = sheetDimOf(r.sheet, r.axis);
+    if (existing) existing.value = v;
+    else doc.dims.push({ id: newId(), axis: r.axis, a: r.a, b: r.b, value: v, kind: 'sheet', refs: r.refs.map((q) => ({ ...q })) });
+    // 原点だけを選んでいるときは、続けてもう一方の向きを入れられるように選んだままにする
+    if (!opt.isOrigin) sel = [];
+    changed();
+    return;
+  }
   const cur = P(r.b)[r.axis] - P(r.a)[r.axis];
   const existing = findDim(r.axis, r.refs, r.kind);
   // 向き（どちら側か）はいまの位置のまま。原点からの寸法は入れた符号のまま（Y は下へ正）
@@ -871,6 +994,11 @@ function deleteSelected() {
     }
   }
   const dimIds = new Set(sel.filter((s) => s.t === 'dim').map((s) => s.id));
+  // 外形の原点を選んで消すと、板の原点からの寸法を消す（外形はそこに残る）
+  for (const s of sel) {
+    if (s.t !== 'origin') continue;
+    for (const axis of ['x', 'y']) { const d = sheetDimOf(s.id, axis); if (d) dimIds.add(d.id); }
+  }
   doc.dims = doc.dims.filter((d) => !dimIds.has(d.id));
   if (lineIds.size) Geo.deleteLines(doc, [...lineIds]);
   sel = [];
@@ -925,7 +1053,8 @@ function genCode() {
     if (g.k != null) {
       const sh = shapes[info.outers[g.k].shape];
       const tl = rel(sheetTopLeft(), g.origin.x, g.origin.y);
-      add(`; S${g.k + 1} 外形 ${sh.poly.length}角  原点は板の左上から X${fmt(tl.x)} Y${fmt(tl.y)}`, null, true);
+      const fixedTxt = ['x', 'y'].map((ax) => (sheetDimOf(g.k, ax) ? '●' : '○')).join('');
+      add(`; S${g.k + 1} 外形 ${sh.poly.length}角  原点は板原点から X${fmt(tl.x)} Y${fmt(tl.y)} ${fixedTxt}`, null, true);
       add(`S${g.k + 1}  外形   ${span(g.origin, sh.poly)}`, null);
       for (const c of shapes) if (c.role !== 'outer' && c.outer === g.k) add(`S${g.k + 1}  ${roleName[c.role].padEnd(4, '　')} ${span(g.origin, c.poly)}`, null);
     } else {
@@ -952,6 +1081,7 @@ function genCode() {
       const v = dimShown(d);
       const k = info.owner.get(d.b);
       const what = d.kind === 'len' ? `${refName(d.refs[0])} の長さ`
+        : d.kind === 'sheet' ? `板原点-${k == null ? '(閉じていない外形)' : `S${k + 1} 原点`} ${axisName(d.axis)}`
         : d.kind === 'o' ? `${k == null ? '' : `S${k + 1} `}原点-${refName(d.refs[1])} ${axisName(d.axis)}`
         : `${d.refs.map(refName).join('-')} ${axisName(d.axis)}`;
       add(`D${String(d.id).padEnd(4)}${what}  ${fmt(v)}`, `dim:${d.id}`);

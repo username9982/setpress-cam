@@ -50,7 +50,8 @@ const Geo = (() => {
       if ((l.dir === 'h' && axis === 'y') || (l.dir === 'v' && axis === 'x')) rel.push({ a: l.a, b: l.b, o: 0 });
     }
     for (const d of doc.dims) {
-      if (d.axis === axis && d.id !== skipDim) rel.push({ a: d.a, b: d.b, o: d.value });
+      // 板の原点からの寸法（kind 'sheet'）は、外形をまるごと平行移動して合わせるので、ここには入れない
+      if (d.axis === axis && d.id !== skipDim && d.kind !== 'sheet') rel.push({ a: d.a, b: d.b, o: d.value });
     }
     return rel;
   }
