@@ -19,7 +19,7 @@
   #work { display: flex; flex: 1; min-height: 0; }
   #stage { position: relative; flex: 1; min-width: 0; min-height: 0; }
 </style>
-<link rel="stylesheet" href="style.css?v=0.3.0">
+<link rel="stylesheet" href="style.css?v=0.4.0">
 <!-- ?v= は tools/bump_version.py で書き換える。古い style.css・app.js と組み合わさらないようにするため -->
 </head>
 <body>
@@ -27,6 +27,7 @@
   <div class="group">
     <button id="btn-draw" class="mode active" data-mode="draw">描く</button>
     <button id="btn-select" class="mode" data-mode="select">選ぶ</button>
+    <label title="これから描く四角穴（F3）に使う金型">F3 <select id="cur-tool" aria-label="描く四角穴の金型"></select></label>
   </div>
   <div class="group">
     <button id="btn-undo">元に戻す</button>
@@ -56,19 +57,24 @@
 <main id="stage">
   <canvas id="canvas"></canvas>
   <div id="props" hidden>
-    <div class="props-title">選んだ四角形</div>
+    <div class="props-title">四角穴（F3）</div>
+    <div class="props-sub">開始点（左上）</div>
     <label>X <input id="p-x" type="number" inputmode="decimal" step="any"></label>
     <label>Y <input id="p-y" type="number" inputmode="decimal" step="any"></label>
-    <label>幅 <input id="p-w" type="number" inputmode="decimal" step="any" min="0.1"></label>
-    <label>高さ <input id="p-h" type="number" inputmode="decimal" step="any" min="0.1"></label>
-    <div class="props-note">単位 mm・左下が原点</div>
+    <div class="props-sub">XY 寸法</div>
+    <label>X <input id="p-w" type="number" inputmode="decimal" step="any" min="0.1"></label>
+    <label>Y <input id="p-h" type="number" inputmode="decimal" step="any" min="0.1"></label>
+    <div class="props-sub">金型</div>
+    <select id="p-tool" aria-label="この四角穴の金型"></select>
+    <div id="p-warn" class="props-warn" hidden></div>
+    <div class="props-note">単位 mm・原点は板の左下</div>
   </div>
 </main>
 
 <aside id="code-panel">
   <div class="code-head">
     <span class="code-title">コード</span>
-    <span class="code-note">仮の形式</span>
+    <span class="code-note">手入力の順</span>
     <button id="btn-copy" type="button">コピー</button>
   </div>
   <div id="code" role="textbox" aria-readonly="true" aria-multiline="true" aria-label="コード"></div>
@@ -135,6 +141,6 @@
   </form>
 </dialog>
 
-<script src="app.js?v=0.3.0"></script>
+<script src="app.js?v=0.4.0"></script>
 </body>
 </html>

@@ -1,9 +1,9 @@
 'use strict';
 
-// セットプレス CAM — 動作確認版: 四角形を描いて保存する。
+// セットプレス CAM — 四角穴（F3）を描き、機械に手で打ち込む順に表示する。
 // 座標はすべて mm。原点は板の左下、Y は上向き（機械の座標に合わせる）。
 
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.4.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -54,6 +54,10 @@ function toolText(t) {
   if (t.shape === 'round') return `丸 φ${t.d}`;
   if (t.shape === 'special') return `異形 ${t.w} x ${t.h}${t.note ? ` (${t.note})` : ''}`;
   return '使わない';
+}
+function firstRectTool(tools) {
+  const i = normalizeTools(tools).findIndex((t) => t.shape === 'rect');
+  return i >= 0 ? i : 0;
 }
 function programText(p) { return p == null ? 'O----' : 'O' + String(p).padStart(4, '0'); }
 let doc = newDoc();
@@ -169,24 +173,41 @@ function draw() {
   ctx.fillStyle = '#4a5a6a';
   ctx.fillText(`${w} × ${h} mm`, x0, y0 - 8);
 
-  // 四角形
+  // 四角穴
   for (const r of doc.rects) drawRect(r, r.id === selectedId ? 'selected' : 'normal');
   if (drag && drag.kind === 'draw' && drag.rect) drawRect(drag.rect, 'preview');
 }
 
+// 四角穴（F3）: 穴の外形、左上の開始点、開始点に置いた金型の大きさを描く。
+// 金型が合わない（長方形でない・穴より大きい）ときは赤で描く。
 function drawRect(r, style) {
-  const [sx, sy] = toScreen(r.x, r.y + r.h);
+  const [sx, sy] = toScreen(r.x, r.y + r.h);  // 左上
   const sw = r.w * view.scale, sh = r.h * view.scale;
-  ctx.fillStyle = style === 'selected' ? 'rgba(232,163,61,0.25)' : 'rgba(47,128,209,0.12)';
+  const bad = holeProblem(r) != null;
+  ctx.fillStyle = bad ? 'rgba(192,57,43,0.14)'
+    : style === 'selected' ? 'rgba(232,163,61,0.25)' : 'rgba(47,128,209,0.12)';
   ctx.fillRect(sx, sy, sw, sh);
-  ctx.strokeStyle = style === 'selected' ? '#d4881c' : '#2f80d1';
+  ctx.strokeStyle = bad ? '#c0392b' : style === 'selected' ? '#d4881c' : '#2f80d1';
   ctx.lineWidth = style === 'normal' ? 1.5 : 2.5;
   ctx.setLineDash(style === 'preview' ? [6, 4] : []);
   ctx.strokeRect(sx, sy, sw, sh);
   ctx.setLineDash([]);
 
+  // 開始点に置いた金型（点線）
+  const t = doc.tools[r.tool];
+  if (t && t.shape === 'rect') {
+    ctx.strokeStyle = bad ? '#c0392b' : '#1d2b38';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.strokeRect(sx, sy, t.w * view.scale, t.h * view.scale);
+    ctx.setLineDash([]);
+  }
+  // 左上の開始点
+  ctx.fillStyle = bad ? '#c0392b' : '#1d2b38';
+  ctx.beginPath(); ctx.arc(sx, sy, style === 'normal' ? 3 : 4.5, 0, Math.PI * 2); ctx.fill();
+
   if (style !== 'normal') {
-    // 寸法と位置
+    // 寸法と開始点
     ctx.font = 'bold 14px sans-serif';
     ctx.fillStyle = '#1d2b38';
     ctx.textAlign = 'center';
@@ -196,9 +217,12 @@ function drawRect(r, style) {
     ctx.rotate(-Math.PI / 2);
     ctx.fillText(`${round(r.h)}`, 0, 0);
     ctx.restore();
-    ctx.textAlign = 'left';
+    ctx.textAlign = 'right';
     ctx.font = '12px sans-serif';
-    ctx.fillText(`(${round(r.x)}, ${round(r.y)})`, sx + 4, sy + sh + 16);
+    ctx.fillText(`開始点 (${round(r.x)}, ${round(r.y + r.h)})`, sx - 6, sy - 6);
+    ctx.textAlign = 'left';
+    const p = holeProblem(r);
+    if (p) { ctx.fillStyle = '#c0392b'; ctx.fillText(p, sx, sy + sh + 16); }
   }
 }
 
@@ -254,6 +278,11 @@ canvas.addEventListener('pointerdown', (e) => {
   const [wx, wy] = toWorld(sx, sy);
 
   if (mode === 'draw') {
+    if (rectToolIndexes().length === 0) {
+      drag = null;
+      flash('長方形の金型がありません。「金型」で T1〜T3 のどれかを長方形にしてください');
+      return;
+    }
     const [px, py] = clampToSheet(snapValue(wx), snapValue(wy));
     drag = { kind: 'draw', start: [px, py], rect: null };
   } else {
@@ -293,7 +322,10 @@ canvas.addEventListener('pointermove', (e) => {
   } else if (drag.kind === 'draw') {
     const [px, py] = clampToSheet(snapValue(wx), snapValue(wy));
     const [x1, y1] = drag.start;
-    drag.rect = { x: Math.min(x1, px), y: Math.min(y1, py), w: round(Math.abs(px - x1)), h: round(Math.abs(py - y1)) };
+    drag.rect = {
+      x: Math.min(x1, px), y: Math.min(y1, py), w: round(Math.abs(px - x1)), h: round(Math.abs(py - y1)),
+      tool: currentTool(),
+    };
     draw();
   } else if (drag.kind === 'move') {
     const r = doc.rects.find((q) => q.id === drag.id);
@@ -322,7 +354,7 @@ function endPointer(e) {
     const r = drag.rect;
     if (r && r.w > 0 && r.h > 0 && e.type !== 'pointercancel') {
       snapshot();
-      const rect = { id: nextId++, x: r.x, y: r.y, w: r.w, h: r.h };
+      const rect = { id: nextId++, x: r.x, y: r.y, w: r.w, h: r.h, tool: r.tool };
       doc.rects.push(rect);
       selectedId = rect.id;
       changed();
@@ -360,13 +392,50 @@ document.querySelectorAll('button.mode').forEach((b) => b.addEventListener('clic
 
 function selected() { return doc.rects.find((r) => r.id === selectedId) || null; }
 
+// ---- 四角穴（F3）と金型 ----
+// 長方形の金型の番号（0 始まり）
+function rectToolIndexes() {
+  return doc.tools.map((t, i) => (t.shape === 'rect' ? i : -1)).filter((i) => i >= 0);
+}
+// これから描く四角穴に使う金型。選んだものが長方形でなくなっていたら、最初の長方形の金型にする。
+let curTool = 0;
+function currentTool() {
+  const ok = rectToolIndexes();
+  if (!ok.includes(curTool)) curTool = ok.length ? ok[0] : 0;
+  return curTool;
+}
+// 四角穴の問題（無ければ null）
+function holeProblem(r) {
+  const t = doc.tools[r.tool];
+  if (!t || t.shape !== 'rect') return `T${(r.tool ?? 0) + 1} が長方形の金型ではありません`;
+  if (r.w < t.w || r.h < t.h) return `穴 ${round(r.w)} x ${round(r.h)} が金型 ${t.w} x ${t.h} より小さい`;
+  return null;
+}
+// 金型の選択欄を作り直す（長方形の金型だけを選べる）
+function fillToolSelect(sel, value, includeBad) {
+  const ok = rectToolIndexes();
+  const items = ok.map((i) => [i, `T${i + 1} ${toolText(doc.tools[i])}`]);
+  if (includeBad && !ok.includes(value)) items.unshift([value, `T${value + 1}（長方形ではない）`]);
+  const html = items.length ? items.map(([i, s]) => `<option value="${i}">${s}</option>`).join('')
+    : '<option value="">長方形の金型なし</option>';
+  if (sel.innerHTML !== html) sel.innerHTML = html;
+  sel.value = String(value);
+  sel.disabled = !items.length;
+}
+
 function updateProps() {
   const r = selected();
   $('props').hidden = !r;
   if (!r) return;
-  for (const [k, id] of [['x', 'p-x'], ['y', 'p-y'], ['w', 'p-w'], ['h', 'p-h']]) {
-    if (document.activeElement !== $(id)) $(id).value = round(r[k]);
+  // 開始点は左上。内部では左下を持っているので、Y は上端（y + h）を見せる。
+  const vals = { 'p-x': r.x, 'p-y': r.y + r.h, 'p-w': r.w, 'p-h': r.h };
+  for (const [id, v] of Object.entries(vals)) {
+    if (document.activeElement !== $(id)) $(id).value = round(v);
   }
+  fillToolSelect($('p-tool'), r.tool, true);
+  const p = holeProblem(r);
+  $('p-warn').textContent = p || '';
+  $('p-warn').hidden = !p;
 }
 
 function updateUi() {
@@ -375,7 +444,8 @@ function updateUi() {
   $('sheet-w').value = doc.sheet.w;
   $('sheet-h').value = doc.sheet.h;
   $('st-name').textContent = (doc.name || '名前なし') + (dirty ? ' *' : '');
-  $('st-count').textContent = `四角形 ${doc.rects.length} 個`;
+  $('st-count').textContent = `四角穴 ${doc.rects.length} 個`;
+  fillToolSelect($('cur-tool'), currentTool(), false);
   $('st-prog').textContent = doc.program == null ? 'プログラム番号なし' : programText(doc.program);
   $('st-tools').textContent = doc.tools.map((t, i) => (t.shape === 'none' ? null : `T${i + 1} ${toolText(t)}`))
     .filter(Boolean).join('　') || '金型なし';
@@ -384,31 +454,36 @@ function updateUi() {
 }
 
 // ---- コードの区画 ----
-// 機械の入力形式が決まるまでの仮の形式。四角形ごとに、左下の角から反時計回りに一周する。
+// 機械に手で打ち込む順に並べる。四角穴は F3 のあとに
+// 左上の開始点 → 穴の XY 寸法 → 金型の XY 寸法 を入れる。
 function fmt(v) {
   return String(round(v));
+}
+function xy(x, y, note) {
+  return `  ${('X' + fmt(x)).padEnd(8)}${('Y' + fmt(y)).padEnd(8)}; ${note}`;
 }
 function genCode() {
   const lines = [];  // {text, rectId?, comment?}
   const add = (text, rectId, comment = false) => lines.push({ text, rectId, comment });
-  add(`; セットプレス CAM v${APP_VERSION}（仮の形式）`, null, true);
+  add(`; セットプレス CAM v${APP_VERSION}`, null, true);
   add(`; 図面 ${doc.name || '名前なし'}  板 ${fmt(doc.sheet.w)} x ${fmt(doc.sheet.h)} mm`, null, true);
   add(programText(doc.program), null);
   doc.tools.forEach((t, i) => add(`; T${i + 1} ${toolText(t)}`, null, true));
-  add('G21 G90', null);
-  let n = 10;
-  const nl = (s, id) => { add(`N${n} ${s}`, id); n += 10; };
+  if (doc.rects.length) add('; F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法', null, true);
   doc.rects.forEach((r, i) => {
-    const x1 = r.x, y1 = r.y, x2 = r.x + r.w, y2 = r.y + r.h;
-    add(`; 四角形 ${i + 1}  幅 ${fmt(r.w)}  高さ ${fmt(r.h)}`, r.id, true);
-    nl(`G00 X${fmt(x1)} Y${fmt(y1)}`, r.id);
-    nl(`G01 X${fmt(x2)} Y${fmt(y1)}`, r.id);
-    nl(`G01 X${fmt(x2)} Y${fmt(y2)}`, r.id);
-    nl(`G01 X${fmt(x1)} Y${fmt(y2)}`, r.id);
-    nl(`G01 X${fmt(x1)} Y${fmt(y1)}`, r.id);
+    const t = doc.tools[r.tool];
+    add('', null);
+    add(`; 四角穴 ${i + 1}`, r.id, true);
+    const p = holeProblem(r);
+    if (p) add(`; ※ ${p}`, r.id, true);
+    add(`T${r.tool + 1}`, r.id);
+    add('F3', r.id);
+    add(xy(r.x, r.y + r.h, '開始点'), r.id);
+    add(xy(r.w, r.h, '寸法'), r.id);
+    if (t && t.shape === 'rect') add(xy(t.w, t.h, '金型'), r.id);
+    else add('  ?       ?       ; 金型', r.id);
   });
-  if (!doc.rects.length) add('; 四角形がありません', null, true);
-  nl('M30', null);
+  if (!doc.rects.length) { add('', null); add('; 四角穴がありません', null, true); }
   return lines;
 }
 
@@ -434,12 +509,12 @@ function renderCode() {
     box.append(row);
     if (!firstSel && row.classList.contains('sel')) firstSel = row;
   });
-  // 選んだ四角形が変わったときだけ、その行まで送る
+  // 選んだ四角穴が変わったときだけ、その行まで送る
   if (selectedId !== lastCodeSel && firstSel) firstSel.scrollIntoView({ block: 'nearest' });
   lastCodeSel = selectedId;
 }
 
-// 行をタップすると、その四角形を選ぶ
+// 行をタップすると、その四角穴を選ぶ
 $('code')?.addEventListener('click', (e) => {
   const row = e.target.closest('.ln.rect');
   if (!row || (window.getSelection && String(window.getSelection()).length)) return;
@@ -485,17 +560,37 @@ numberInput('sheet-h', () => 10, () => 5000, (v) => {
   if (v === doc.sheet.h) return;
   snapshot(); doc.sheet.h = v; changed(); fitView();
 });
-function propInput(id, key, min, max) {
+// 選んだ四角穴の欄。開始点（左上）を基準にするので、Y 寸法を変えても開始点は動かさない。
+// set(r, v) は新しい {x, y, w, h} を返す。
+function propInput(id, min, max, set) {
   numberInput(id, min, max, (v) => {
     const r = selected();
-    if (!r || r[key] === v) { updateUi(); return; }
-    snapshot(); r[key] = v; changed();
+    if (!r) { updateUi(); return; }
+    const n = set(r, v);
+    if (n.x === r.x && n.y === r.y && n.w === r.w && n.h === r.h) { updateUi(); return; }
+    snapshot(); Object.assign(r, n); changed();
   });
 }
-propInput('p-x', 'x', () => 0, () => doc.sheet.w - (selected()?.w || 0));
-propInput('p-y', 'y', () => 0, () => doc.sheet.h - (selected()?.h || 0));
-propInput('p-w', 'w', () => 0.1, () => doc.sheet.w - (selected()?.x || 0));
-propInput('p-h', 'h', () => 0.1, () => doc.sheet.h - (selected()?.y || 0));
+const rectTop = (r) => round(r.y + r.h);
+propInput('p-x', () => 0, () => doc.sheet.w - (selected()?.w || 0),
+  (r, v) => ({ ...r, x: v }));
+propInput('p-y', () => selected()?.h || 0, () => doc.sheet.h,
+  (r, v) => ({ ...r, y: round(v - r.h) }));
+propInput('p-w', () => 0.1, () => doc.sheet.w - (selected()?.x || 0),
+  (r, v) => ({ ...r, w: v }));
+propInput('p-h', () => 0.1, () => rectTop(selected() || { y: 0, h: 0 }),
+  (r, v) => ({ ...r, h: v, y: round(rectTop(r) - v) }));
+
+$('p-tool').addEventListener('change', () => {
+  const r = selected();
+  const v = Number($('p-tool').value);
+  if (!r || r.tool === v) return;
+  snapshot(); r.tool = v; curTool = v; changed();
+});
+$('cur-tool').addEventListener('change', () => {
+  curTool = Number($('cur-tool').value);
+  updateUi();
+});
 
 $('btn-undo').addEventListener('click', undo);
 $('btn-fit').addEventListener('click', fitView);
@@ -536,7 +631,11 @@ function loadDoc(d) {
     program: Number.isInteger(prog) && prog >= PROGRAM_MIN && prog <= PROGRAM_MAX ? prog : null,
     tools: normalizeTools(d.tools),
     sheet: { w: Number(d.sheet.w) || 1000, h: Number(d.sheet.h) || 500 },
-    rects: d.rects.map((r, i) => ({ id: i + 1, x: Number(r.x), y: Number(r.y), w: Number(r.w), h: Number(r.h) }))
+    rects: d.rects.map((r, i) => ({
+      id: i + 1, x: Number(r.x), y: Number(r.y), w: Number(r.w), h: Number(r.h),
+      // 金型の無い古い図面は、最初の長方形の金型（無ければ T1）にする
+      tool: Number.isInteger(r.tool) && r.tool >= 0 && r.tool < TOOL_COUNT ? r.tool : firstRectTool(d.tools),
+    }))
       .filter((r) => [r.x, r.y, r.w, r.h].every(Number.isFinite) && r.w > 0 && r.h > 0),
   };
   nextId = doc.rects.length + 1;
@@ -595,7 +694,7 @@ function renderOpenList() {
     const small = document.createElement('small');
     const d = new Date(item.savedAt);
     const prog = item.doc.program != null ? `${programText(item.doc.program)}・` : '';
-    small.textContent = `${prog}${d.toLocaleString('ja-JP')}・四角形 ${item.doc.rects.length} 個・${item.doc.sheet.w}×${item.doc.sheet.h} mm`;
+    small.textContent = `${prog}${d.toLocaleString('ja-JP')}・四角穴 ${item.doc.rects.length} 個・${item.doc.sheet.w}×${item.doc.sheet.h} mm`;
     info.append(small);
     const open = document.createElement('button');
     open.type = 'button';

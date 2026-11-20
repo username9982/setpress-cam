@@ -119,6 +119,7 @@ input[type=number], input[type=text], select {
   -webkit-user-select: none;
   user-select: none;
 }
+#code .ln .tx { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 #code .ln.cmt .tx { color: #5f7a5f; }
 #code .ln.rect { cursor: pointer; }
 #code .ln.sel { background: rgba(232, 163, 61, 0.22); }
@@ -148,6 +149,10 @@ input[type=number], input[type=text], select {
 #props label { display: grid; grid-template-columns: 3em 110px; align-items: center; }
 #props input { width: 110px; }
 .props-title { font-weight: 700; }
+.props-sub { font-size: 13px; font-weight: 600; color: #4a5a6a; margin-top: 2px; }
+#p-tool { width: 100%; max-width: 170px; }
+.props-warn { max-width: 170px; font-size: 13px; font-weight: 600; color: #b5473c; }
+#cur-tool { max-width: 190px; }
 .props-note { font-size: 13px; color: #667; }
 
 #status {
