@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.10.3';
+const APP_VERSION = '0.11.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -34,7 +34,7 @@ function newDoc() {
     name: '',
     program: null,  // プログラム番号
     tools: Array.from({ length: TOOL_COUNT }, emptyTool),
-    sheet: { w: 1000, h: 500 },
+    sheet: { w: 1000, h: 500, t: null },  // t: 板厚（mm、未設定は null）
     points: [],
     lines: [],
     dims: [],
@@ -258,7 +258,7 @@ function draw() {
   ctx.fillStyle = '#4a5a6a';
   ctx.textAlign = 'left';
   ctx.textAlign = 'right';
-  ctx.fillText(`板 ${w} × ${h} mm`, x0 + sw, y0 - 8);
+  ctx.fillText(`板 ${w} × ${h} mm${doc.sheet.t ? `  板厚 ${doc.sheet.t} mm` : ''}`, x0 + sw, y0 - 8);
   ctx.textAlign = 'left';
   drawSheetOrigin();
 
@@ -1037,6 +1037,7 @@ function updateUi() {
   $('btn-undo').disabled = !undoStack.length;
   $('sheet-w').value = doc.sheet.w;
   $('sheet-h').value = doc.sheet.h;
+  if (document.activeElement !== $('sheet-t')) $('sheet-t').value = doc.sheet.t ?? '';
   $('st-name').textContent = (doc.name || '名前なし') + (dirty ? ' *' : '');
   const fixedLines = doc.lines.filter((l) => info.fixedLine(l)).length;
   $('st-count').textContent = `線 ${doc.lines.length} 本（確定 ${fixedLines}）・寸法 ${doc.dims.length}`;
@@ -1057,6 +1058,7 @@ function genCode() {
   const add = (text, key, comment = false) => lines.push({ text, key, comment });
   add(`; セットプレス CAM v${APP_VERSION}`, null, true);
   add(`; 図面 ${doc.name || '名前なし'}  板 ${fmt(doc.sheet.w)} x ${fmt(doc.sheet.h)} mm`, null, true);
+  add(`; 板厚 ${doc.sheet.t ? `${fmt(doc.sheet.t)} mm` : '未設定'}`, null, true);
   add(programText(doc.program), null);
   doc.tools.forEach((t, i) => add(`; T${i + 1} ${toolText(t)}`, null, true));
   add('', null);
@@ -1193,6 +1195,18 @@ numberInput('sheet-h', () => 10, () => 5000, (v) => {
   if (v === doc.sheet.h) return;
   snapshot(); doc.sheet.h = v; changed(); fitView();
 });
+// 板厚: 0.1〜50 mm。空にすると未設定に戻す
+{
+  const el = $('sheet-t');
+  el.addEventListener('change', () => {
+    let v = el.value.trim() === '' ? null : parseFloat(el.value);
+    if (v !== null && !Number.isFinite(v)) { updateUi(); return; }
+    if (v !== null) v = round(Math.min(Math.max(v, 0.1), 50));
+    if (v === (doc.sheet.t ?? null)) { updateUi(); return; }
+    snapshot(); doc.sheet.t = v; changed();
+  });
+  el.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); el.blur(); } });
+}
 
 $('btn-undo').addEventListener('click', undo);
 $('btn-fit').addEventListener('click', fitView);
@@ -1254,7 +1268,7 @@ function loadDoc(d) {
     name: String(d.name || ''),
     program: Number.isInteger(prog) && prog >= PROGRAM_MIN && prog <= PROGRAM_MAX ? prog : null,
     tools: normalizeTools(d.tools),
-    sheet: { w: Number(d.sheet.w) || 1000, h: Number(d.sheet.h) || 500 },
+    sheet: { w: Number(d.sheet.w) || 1000, h: Number(d.sheet.h) || 500, t: posNum(d.sheet.t) },
     points, lines, dims,
     nextId: Math.max(Number(d.nextId) || 1, maxId + 1),
   };

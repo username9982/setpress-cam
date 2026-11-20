@@ -21,7 +21,7 @@
   #work { display: flex; flex: 1; min-height: 0; }
   #stage { position: relative; flex: 1; min-width: 0; min-height: 0; }
 </style>
-<link rel="stylesheet" href="style.css?v=0.10.3">
+<link rel="stylesheet" href="style.css?v=0.11.0">
 <!-- ?v= は tools/bump_version.py で書き換える。古い style.css・app.js と組み合わさらないようにするため -->
 </head>
 <body>
@@ -37,8 +37,9 @@
     <button id="btn-fit">全体表示</button>
   </div>
   <div class="group">
-    <label>板 <input id="sheet-w" type="number" inputmode="decimal" min="10" max="5000"> ×
-      <input id="sheet-h" type="number" inputmode="decimal" min="10" max="5000"> mm</label>
+    <label>板 <input id="sheet-w" type="number" inputmode="decimal" min="10" max="5000" aria-label="板の幅"> ×
+      <input id="sheet-h" type="number" inputmode="decimal" min="10" max="5000" aria-label="板の高さ"> ×
+      t<input id="sheet-t" type="number" inputmode="decimal" min="0.1" max="50" step="any" placeholder="厚さ" aria-label="板厚"> mm</label>
     <label>グリッド
       <select id="snap">
         <option value="0.1">0.1</option>
@@ -131,7 +132,7 @@
   </form>
 </dialog>
 
-<script src="geom.js?v=0.10.3"></script>
-<script src="app.js?v=0.10.3"></script>
+<script src="geom.js?v=0.11.0"></script>
+<script src="app.js?v=0.11.0"></script>
 </body>
 </html>
