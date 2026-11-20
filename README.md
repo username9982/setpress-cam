@@ -37,7 +37,9 @@ python -m http.server 8765 --bind 127.0.0.1
 
 ## iPad で使う
 
-Service Worker（オフライン動作）は **HTTPS** でしか動かないため、HTTPS の場所に置く必要がある（GitHub Pages など）。
+公開先: https://username9982.github.io/setpress-cam/ （GitHub Pages。`main` ブランチに push すると数分で更新される）
+
+Service Worker（オフライン動作）は **HTTPS** でしか動かないため、HTTPS の場所に置く必要がある。
 
 1. iPad の Safari でページを開く
 2. 共有ボタン →「ホーム画面に追加」
