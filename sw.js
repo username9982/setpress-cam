@@ -2,11 +2,12 @@
 
 // オフラインで動かすための Service Worker。
 // 中身を変えたら CACHE_NAME の版を上げる（app.js の APP_VERSION と合わせる）。
-const CACHE_NAME = 'setpress-cam-0.4.0';
+const CACHE_NAME = 'setpress-cam-0.5.0';
 const FILES = [
   './',
   './index.html',
   './style.css',
+  './geom.js',
   './app.js',
   './manifest.webmanifest',
   './icons/icon-192.png',

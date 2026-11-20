@@ -1,9 +1,9 @@
 'use strict';
 
-// セットプレス CAM — 四角穴（F3）を描き、機械に手で打ち込む順に表示する。
-// 座標はすべて mm。原点は板の左下、Y は上向き（機械の座標に合わせる）。
+// セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
+// 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示はワーク原点からの値にする。
 
-const APP_VERSION = '0.4.0';
+const APP_VERSION = '0.5.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -23,14 +23,20 @@ const TOOL_COUNT = 3;  // T1〜T3
 const PROGRAM_MIN = 1, PROGRAM_MAX = 9999;
 
 function emptyTool() { return { shape: 'none', w: null, h: null, d: null, note: '' }; }
+// points: [{id, x, y}]、lines: [{id, a, b, dir:'h'|'v'}]、
+// dims: [{id, axis:'x'|'y', a, b, value, kind, refs:[{t:'point'|'line', id}]}]（b − a = value）
 function newDoc() {
   return {
-    version: 2,
+    version: 3,
     name: '',
     program: null,  // プログラム番号
     tools: Array.from({ length: TOOL_COUNT }, emptyTool),
     sheet: { w: 1000, h: 500 },
-    rects: [],
+    originId: null,  // ワーク原点の点
+    points: [],
+    lines: [],
+    dims: [],
+    nextId: 1,
   };
 }
 function posNum(v) {
@@ -55,17 +61,15 @@ function toolText(t) {
   if (t.shape === 'special') return `異形 ${t.w} x ${t.h}${t.note ? ` (${t.note})` : ''}`;
   return '使わない';
 }
-function firstRectTool(tools) {
-  const i = normalizeTools(tools).findIndex((t) => t.shape === 'rect');
-  return i >= 0 ? i : 0;
-}
 function programText(p) { return p == null ? 'O----' : 'O' + String(p).padStart(4, '0'); }
+
 let doc = newDoc();
-let selectedId = null;
-let nextId = 1;
+let sel = [];  // 選んだ要素 [{t:'point'|'line'|'dim', id}]（2 つまで）
 let dirty = false;
+let info = Geo.analyze(doc);  // 確定しているか（図形を変えるたびに作り直す）
 const undoStack = [];
 
+function newId() { return doc.nextId++; }
 function snapshot() {
   undoStack.push(JSON.stringify(doc));
   if (undoStack.length > 100) undoStack.shift();
@@ -73,12 +77,16 @@ function snapshot() {
 function undo() {
   if (!undoStack.length) return;
   doc = JSON.parse(undoStack.pop());
-  if (!doc.rects.some((r) => r.id === selectedId)) selectedId = null;
+  dropMissingSelection();
   changed();
 }
 function changed() {
   dirty = true;
   saveCurrent();
+  refresh();
+}
+function refresh() {
+  info = Geo.analyze(doc);
   updateUi();
   draw();
 }
@@ -86,6 +94,17 @@ function saveCurrent() {
   try { localStorage.setItem(CURRENT_KEY, JSON.stringify({ doc, dirty })); } catch (e) { /* 保存できなくても続ける */ }
 }
 function round(v) { return Math.round(v * 1000) / 1000; }
+
+const P = (id) => Geo.pointById(doc, id);
+const L = (id) => Geo.lineById(doc, id);
+const D = (id) => doc.dims.find((d) => d.id === id);
+const origin = () => (doc.originId != null ? P(doc.originId) : null);
+// 原点からの座標
+function relX(x) { const o = origin(); return round(x - (o ? o.x : 0)); }
+function relY(y) { const o = origin(); return round(y - (o ? o.y : 0)); }
+function elemExists(s) { return s.t === 'point' ? !!P(s.id) : s.t === 'line' ? !!L(s.id) : !!D(s.id); }
+function dropMissingSelection() { sel = sel.filter(elemExists); }
+function isSel(t, id) { return sel.some((s) => s.t === t && s.id === id); }
 
 // ---- 表示の変換（mm ⇔ 画面） ----
 // fitted: 「全体表示」のままか（指やホイールで動かしたら false）
@@ -127,7 +146,26 @@ function resize() {
   }
 }
 
+// ---- グリッドに合わせる（原点があれば原点を基準にする） ----
+function snapStep() { return parseFloat($('snap').value); }
+function snapAxis(v, axis) {
+  const o = origin();
+  const base = o ? o[axis] : 0;
+  const s = snapStep();
+  return round(base + Math.round((v - base) / s) * s);
+}
+
 // ---- 描画 ----
+const COLOR = {
+  fixed: '#1d2b38',     // 確定
+  free: '#2f80d1',      // まだ動く
+  selected: '#e8890c',
+  dim: '#7a4fb3',
+  origin: '#c0392b',
+  preview: '#8a96a3',
+};
+let dimHits = [];  // 寸法の数字の位置（タップ用）[{id, x, y, w, h}]
+
 function gridStep() {
   // 線の間隔が 8px 以上になる 1-2-5 系列の間隔
   const steps = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
@@ -144,112 +182,313 @@ function draw() {
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(x0, y0, sw, sh);
 
-  // グリッド
+  // グリッド（原点を基準にする）
+  const o = origin();
+  const bx = o ? o.x : 0, by = o ? o.y : 0;
   const step = gridStep();
   const major = step * 10;
   ctx.lineWidth = 1;
-  for (let x = 0; x <= w + 1e-9; x += step) {
-    const isMajor = Math.abs(x / major - Math.round(x / major)) < 1e-6;
-    ctx.strokeStyle = isMajor ? '#c3ccd6' : '#eef1f4';
-    const [sx] = toScreen(x, 0);
+  const isMajor = (v) => Math.abs(v / major - Math.round(v / major)) < 1e-6;
+  for (let k = Math.ceil(-bx / step); bx + k * step <= w + 1e-9; k++) {
+    ctx.strokeStyle = isMajor(k * step) ? '#c3ccd6' : '#eef1f4';
+    const [sx] = toScreen(bx + k * step, 0);
     ctx.beginPath(); ctx.moveTo(Math.round(sx) + 0.5, y0); ctx.lineTo(Math.round(sx) + 0.5, y0 + sh); ctx.stroke();
   }
-  for (let y = 0; y <= h + 1e-9; y += step) {
-    const isMajor = Math.abs(y / major - Math.round(y / major)) < 1e-6;
-    ctx.strokeStyle = isMajor ? '#c3ccd6' : '#eef1f4';
-    const [, sy] = toScreen(0, y);
+  for (let k = Math.ceil(-by / step); by + k * step <= h + 1e-9; k++) {
+    ctx.strokeStyle = isMajor(k * step) ? '#c3ccd6' : '#eef1f4';
+    const [, sy] = toScreen(0, by + k * step);
     ctx.beginPath(); ctx.moveTo(x0, Math.round(sy) + 0.5); ctx.lineTo(x0 + sw, Math.round(sy) + 0.5); ctx.stroke();
   }
-
-  // 板の縁と原点
   ctx.strokeStyle = '#4a5a6a';
   ctx.lineWidth = 2;
   ctx.strokeRect(x0, y0, sw, sh);
-  const [ox, oy] = toScreen(0, 0);
-  ctx.fillStyle = '#c0392b';
-  ctx.beginPath(); ctx.arc(ox, oy, 5, 0, Math.PI * 2); ctx.fill();
   ctx.font = '13px sans-serif';
-  ctx.fillText('原点 (0, 0)', ox + 8, oy + 16);
   ctx.fillStyle = '#4a5a6a';
-  ctx.fillText(`${w} × ${h} mm`, x0, y0 - 8);
+  ctx.textAlign = 'left';
+  ctx.fillText(`板 ${w} × ${h} mm`, x0, y0 - 8);
 
-  // 四角穴
-  for (const r of doc.rects) drawRect(r, r.id === selectedId ? 'selected' : 'normal');
-  if (drag && drag.kind === 'draw' && drag.rect) drawRect(drag.rect, 'preview');
+  // 寸法 → 線 → 点 → 原点 の順に重ねる
+  dimHits = [];
+  layoutDims().forEach((lv, i) => drawDim(doc.dims[i], lv));
+  for (const l of doc.lines) drawLine(l);
+  for (const p of doc.points) if (p.id !== doc.originId) drawPoint(p);
+  if (o) drawOrigin(o);
+  if (drag && drag.kind === 'stroke') drawStroke();
 }
 
-// 四角穴（F3）: 穴の外形、左上の開始点、開始点に置いた金型の大きさを描く。
-// 金型が合わない（長方形でない・穴より大きい）ときは赤で描く。
-function drawRect(r, style) {
-  const [sx, sy] = toScreen(r.x, r.y + r.h);  // 左上
-  const sw = r.w * view.scale, sh = r.h * view.scale;
-  const bad = holeProblem(r) != null;
-  ctx.fillStyle = bad ? 'rgba(192,57,43,0.14)'
-    : style === 'selected' ? 'rgba(232,163,61,0.25)' : 'rgba(47,128,209,0.12)';
-  ctx.fillRect(sx, sy, sw, sh);
-  ctx.strokeStyle = bad ? '#c0392b' : style === 'selected' ? '#d4881c' : '#2f80d1';
-  ctx.lineWidth = style === 'normal' ? 1.5 : 2.5;
-  ctx.setLineDash(style === 'preview' ? [6, 4] : []);
-  ctx.strokeRect(sx, sy, sw, sh);
+function drawLine(l) {
+  const a = P(l.a), b = P(l.b);
+  const [ax, ay] = toScreen(a.x, a.y), [bx, by] = toScreen(b.x, b.y);
+  ctx.strokeStyle = isSel('line', l.id) ? COLOR.selected : info.fixedLine(l) ? COLOR.fixed : COLOR.free;
+  ctx.lineWidth = isSel('line', l.id) ? 4 : 2.5;
+  ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+}
+
+function drawPoint(p) {
+  const [x, y] = toScreen(p.x, p.y);
+  const s = isSel('point', p.id);
+  const fixed = info.fixedPoint(p.id);
+  ctx.beginPath(); ctx.arc(x, y, s ? 7 : 5, 0, Math.PI * 2);
+  ctx.fillStyle = s ? COLOR.selected : fixed ? COLOR.fixed : '#ffffff';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = s ? COLOR.selected : fixed ? COLOR.fixed : COLOR.free;
+  ctx.stroke();
+}
+
+function drawOrigin(o) {
+  const [x, y] = toScreen(o.x, o.y);
+  const s = isSel('point', o.id);
+  ctx.strokeStyle = s ? COLOR.selected : COLOR.origin;
+  ctx.fillStyle = s ? COLOR.selected : COLOR.origin;
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x - 14, y); ctx.lineTo(x + 14, y); ctx.moveTo(x, y - 14); ctx.lineTo(x, y + 14); ctx.stroke();
+  ctx.font = 'bold 13px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText('原点', x - 12, y + 22);
+  ctx.textAlign = 'left';
+}
+
+// 寸法線を置く位置（寸法線と直角な方向の座標、mm）を決める。
+// 線の長さは、その線のすぐ外側（つながった線と反対の側）。
+// ほかの寸法は図形全体の外側に段にして並べる（X 方向は下、Y 方向は右）。
+function layoutDims() {
+  const pts = doc.points;
+  if (!pts.length) return [];
+  const minY = Math.min(...pts.map((p) => p.y)), maxX = Math.max(...pts.map((p) => p.x));
+  const step = 30 / view.scale;
+  const count = { x: 0, y: 0 };
+  return doc.dims.map((d) => {
+    if (d.kind === 'len') {
+      const l = L(d.refs[0].id);
+      const across = l.dir === 'h' ? 'y' : 'x';
+      const here = P(l.a)[across];
+      // つながった線の反対の端が、どちら側にあるか
+      let side = 0;
+      for (const m of doc.lines) {
+        if (m.id === l.id) continue;
+        for (const [u, v] of [[m.a, m.b], [m.b, m.a]]) {
+          if (u === l.a || u === l.b) side += Math.sign(P(v)[across] - here);
+        }
+      }
+      const out = side > 0 ? -1 : 1;  // つながった線が上（右）なら下（左）に置く
+      return here + out * 22 / view.scale;
+    }
+    count[d.axis] += 1;
+    return d.axis === 'x' ? minY - (16 / view.scale + step * count.x) : maxX + (16 / view.scale + step * count.y);
+  });
+}
+
+// 要素の、寸法線と直角な方向の座標で、寸法線に近い側の端
+function refNear(r, across, level) {
+  if (r.t === 'point') return P(r.id)[across];
+  const l = L(r.id), a = P(l.a)[across], b = P(l.b)[across];
+  return Math.abs(a - level) < Math.abs(b - level) ? a : b;
+}
+
+// 寸法線: axis の方向の距離を、要素から引き出した補助線と数字で描く
+function drawDim(d, level) {
+  const s = isSel('dim', d.id);
+  const col = s ? COLOR.selected : COLOR.dim;
+  const ax = d.axis;
+  const across = ax === 'x' ? 'y' : 'x';
+  const va = P(d.a)[ax], vb = P(d.b)[ax];
+  const refsAB = d.kind === 'len' ? [d.refs[0], d.refs[0]] : d.refs;
+  const ea = refNear(refsAB[0], across, level), eb = refNear(refsAB[1], across, level);
+  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.2;
+  let p1, p2, e1, e2;
+  if (ax === 'x') {
+    p1 = [va, level]; p2 = [vb, level]; e1 = [va, ea]; e2 = [vb, eb];
+  } else {
+    p1 = [level, va]; p2 = [level, vb]; e1 = [ea, va]; e2 = [eb, vb];
+  }
+  const S = (q) => toScreen(q[0], q[1]);
+  const [s1, s2, f1, f2] = [S(p1), S(p2), S(e1), S(e2)];
+  ctx.setLineDash([2, 3]);
+  ctx.beginPath(); ctx.moveTo(f1[0], f1[1]); ctx.lineTo(s1[0], s1[1]); ctx.moveTo(f2[0], f2[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke();
   ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke();
+  for (const [p, q] of [[s1, s2], [s2, s1]]) arrow(p, q);
+  // 数字
+  const text = d.kind === 'o' ? `${round(d.value)}` : `${round(Math.abs(d.value))}`;
+  ctx.font = 'bold 13px sans-serif';
+  const tw = ctx.measureText(text).width + 10, th = 20;
+  const cx = (s1[0] + s2[0]) / 2, cy = (s1[1] + s2[1]) / 2;
+  const box = { id: d.id, x: cx - tw / 2, y: cy - th / 2, w: tw, h: th };
+  ctx.fillStyle = s ? '#fff4e0' : '#ffffff';
+  ctx.fillRect(box.x, box.y, box.w, box.h);
+  ctx.strokeRect(box.x, box.y, box.w, box.h);
+  ctx.fillStyle = col;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, cx, cy + 1);
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
+  dimHits.push(box);
+}
+function arrow(p, q) {
+  const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+  if (len < 12) return;
+  const ux = (q[0] - p[0]) / len, uy = (q[1] - p[1]) / len;
+  ctx.beginPath();
+  ctx.moveTo(p[0], p[1]);
+  ctx.lineTo(p[0] + ux * 8 - uy * 3.5, p[1] + uy * 8 + ux * 3.5);
+  ctx.lineTo(p[0] + ux * 8 + uy * 3.5, p[1] + uy * 8 - ux * 3.5);
+  ctx.closePath();
+  ctx.fill();
+}
 
-  // 開始点に置いた金型（点線）
-  const t = doc.tools[r.tool];
-  if (t && t.shape === 'rect') {
-    ctx.strokeStyle = bad ? '#c0392b' : '#1d2b38';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([3, 3]);
-    ctx.strokeRect(sx, sy, t.w * view.scale, t.h * view.scale);
-    ctx.setLineDash([]);
+// なぞっている途中: 指の跡（灰色）と、できあがる折れ線（点線）
+function drawStroke() {
+  const raw = drag.raw;
+  if (raw.length < 2) return;
+  ctx.strokeStyle = 'rgba(138,150,163,0.5)';
+  ctx.lineWidth = 6;
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  raw.forEach((p, i) => { const [x, y] = toScreen(p.x, p.y); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+  ctx.stroke();
+  const res = strokeResult(raw);
+  if (!res) return;
+  ctx.strokeStyle = COLOR.free;
+  ctx.lineWidth = 2.5;
+  ctx.setLineDash([7, 5]);
+  ctx.beginPath();
+  res.verts.forEach((v, i) => { const [x, y] = toScreen(v.x, v.y); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // 長さの目安
+  ctx.font = '12px sans-serif';
+  ctx.fillStyle = COLOR.free;
+  ctx.textAlign = 'center';
+  for (let i = 1; i < res.verts.length; i++) {
+    const a = res.verts[i - 1], b = res.verts[i];
+    const [x, y] = toScreen((a.x + b.x) / 2, (a.y + b.y) / 2);
+    ctx.fillText(`${round(Math.abs(b.x - a.x) + Math.abs(b.y - a.y))}`, x + 10, y - 8);
   }
-  // 左上の開始点
-  ctx.fillStyle = bad ? '#c0392b' : '#1d2b38';
-  ctx.beginPath(); ctx.arc(sx, sy, style === 'normal' ? 3 : 4.5, 0, Math.PI * 2); ctx.fill();
+  ctx.textAlign = 'left';
+}
 
-  if (style !== 'normal') {
-    // 寸法と開始点
-    ctx.font = 'bold 14px sans-serif';
-    ctx.fillStyle = '#1d2b38';
-    ctx.textAlign = 'center';
-    ctx.fillText(`${round(r.w)}`, sx + sw / 2, sy - 6);
-    ctx.save();
-    ctx.translate(sx - 8, sy + sh / 2);
-    ctx.rotate(-Math.PI / 2);
-    ctx.fillText(`${round(r.h)}`, 0, 0);
-    ctx.restore();
-    ctx.textAlign = 'right';
-    ctx.font = '12px sans-serif';
-    ctx.fillText(`開始点 (${round(r.x)}, ${round(r.y + r.h)})`, sx - 6, sy - 6);
-    ctx.textAlign = 'left';
-    const p = holeProblem(r);
-    if (p) { ctx.fillStyle = '#c0392b'; ctx.fillText(p, sx, sy + sh + 16); }
+// ---- なぞった線を図形にする ----
+const SNAP_PX = 18;  // 既にある点につなぐ距離（画面の px）
+
+function nearestPoint(x, y, maxPx, exclude) {
+  let best = null, bd = maxPx / view.scale;
+  for (const p of doc.points) {
+    if (exclude && exclude.has(p.id)) continue;
+    const d = Math.hypot(p.x - x, p.y - y);
+    if (d <= bd) { best = p; bd = d; }
   }
+  return best;
+}
+
+// なぞった跡 → {verts: [{x, y, id?, close?}]}。
+// 角はグリッドに合わせ、両端が既にある点の近くならその点につなぐ。
+function strokeResult(raw) {
+  const T = 14 / view.scale;
+  let verts = Geo.strokeToPolyline(raw, T);
+  if (!verts) return null;
+  verts = verts.map((v) => ({ x: snapAxis(v.x, 'x'), y: snapAxis(v.y, 'y') }));
+  const dirs = [];
+  for (let i = 1; i < verts.length; i++) dirs.push(Math.abs(verts[i].y - verts[i - 1].y) < Geo.EPS ? 'h' : 'v');
+  const n = verts.length;
+  // 描き始め
+  const ps = nearestPoint(raw[0].x, raw[0].y, SNAP_PX);
+  if (ps) {
+    verts[0] = { x: ps.x, y: ps.y, id: ps.id };
+    if (dirs[0] === 'h') verts[1].y = ps.y; else verts[1].x = ps.x;
+  }
+  // 描き終わり（描き始めの近くなら閉じる）
+  const last = raw[raw.length - 1];
+  let pe = nearestPoint(last.x, last.y, SNAP_PX);
+  let close = false;
+  if (n >= 4 && Math.hypot(last.x - raw[0].x, last.y - raw[0].y) <= SNAP_PX / view.scale) {
+    pe = verts[0]; close = true;
+  }
+  if (pe && !(ps && pe.id === ps.id && !close)) {
+    const k = n - 2;  // 最後の辺の始まり
+    const dk = dirs[n - 2];
+    const okSingle = k > 0 || !verts[0].id ||
+      (dk === 'h' ? Math.abs(verts[0].y - pe.y) < Geo.EPS : Math.abs(verts[0].x - pe.x) < Geo.EPS);
+    if (okSingle) {
+      if (dk === 'h') verts[k].y = pe.y; else verts[k].x = pe.x;
+      verts[n - 1] = { x: pe.x, y: pe.y, id: close ? undefined : pe.id, close };
+    }
+  }
+  // 長さ 0 の辺を消し、同じ向きに続く辺をまとめる（端の id は残す）
+  const merged = [];
+  for (const v of verts) {
+    const prev = merged[merged.length - 1];
+    if (prev && Math.abs(prev.x - v.x) < Geo.EPS && Math.abs(prev.y - v.y) < Geo.EPS) {
+      if (v.id != null) prev.id = v.id;
+      if (v.close) prev.close = true;
+      continue;
+    }
+    merged.push(v);
+  }
+  const cleaned = Geo.cleanPolyline(merged);
+  if (!cleaned) return null;
+  return { verts: cleaned };
+}
+
+function commitStroke(raw) {
+  const res = strokeResult(raw);
+  if (!res) return false;
+  snapshot();
+  const ids = res.verts.map((v, i) => {
+    if (v.close) return null;  // 描き始めの点と同じ（あとで入れる）
+    if (v.id != null) return v.id;
+    const id = newId();
+    doc.points.push({ id, x: v.x, y: v.y });
+    return id;
+  });
+  if (res.verts[res.verts.length - 1].close) ids[ids.length - 1] = ids[0];
+  let added = 0;
+  for (let i = 1; i < ids.length; i++) {
+    if (ids[i] === ids[i - 1]) continue;
+    const a = P(ids[i - 1]), b = P(ids[i]);
+    const dir = Math.abs(a.y - b.y) < Geo.EPS ? 'h' : 'v';
+    doc.lines.push({ id: newId(), a: ids[i - 1], b: ids[i], dir });
+    added++;
+  }
+  if (!added) { undoStack.pop(); return false; }
+  sel = [];
+  changed();
+  return true;
+}
+
+// ---- 当たり判定 ----
+function hitTest(sx, sy) {
+  const [wx, wy] = toWorld(sx, sy);
+  const p = nearestPoint(wx, wy, 16);
+  if (p) return { t: 'point', id: p.id };
+  for (let i = dimHits.length - 1; i >= 0; i--) {
+    const b = dimHits[i];
+    if (sx >= b.x - 4 && sx <= b.x + b.w + 4 && sy >= b.y - 4 && sy <= b.y + b.h + 4) return { t: 'dim', id: b.id };
+  }
+  let best = null, bd = 12 / view.scale;
+  for (const l of doc.lines) {
+    const a = P(l.a), b = P(l.b);
+    const minx = Math.min(a.x, b.x), maxx = Math.max(a.x, b.x), miny = Math.min(a.y, b.y), maxy = Math.max(a.y, b.y);
+    const dx = wx < minx ? minx - wx : wx > maxx ? wx - maxx : 0;
+    const dy = wy < miny ? miny - wy : wy > maxy ? wy - maxy : 0;
+    const d = Math.hypot(dx, dy);
+    if (d <= bd) { best = l; bd = d; }
+  }
+  return best ? { t: 'line', id: best.id } : null;
 }
 
 // ---- タッチ・マウス操作 ----
-// 指1本: 描く／選ぶ・動かす。指2本: 拡大縮小と移動。
-let mode = 'draw';
+// 指1本: なぞって描く／選ぶ・動かす。指2本: 拡大縮小と移動。
+let mode = 'origin';
 const pointers = new Map();
-let drag = null;  // {kind:'draw'|'move'|'pinch', ...}
+let drag = null;  // {kind:'stroke'|'press'|'move'|'pinch', ...}
 
-function snapValue(v) {
-  const s = parseFloat($('snap').value);
-  return round(Math.round(v / s) * s);
-}
-function clampToSheet(x, y) {
-  return [Math.min(Math.max(x, 0), doc.sheet.w), Math.min(Math.max(y, 0), doc.sheet.h)];
-}
 function eventPos(e) {
   const rect = canvas.getBoundingClientRect();
   return [e.clientX - rect.left, e.clientY - rect.top];
-}
-function hitTest(wx, wy) {
-  const tol = 10 / view.scale;  // 指で押しやすいように少し広く
-  for (let i = doc.rects.length - 1; i >= 0; i--) {
-    const r = doc.rects[i];
-    if (wx >= r.x - tol && wx <= r.x + r.w + tol && wy >= r.y - tol && wy <= r.y + r.h + tol) return r;
-  }
-  return null;
 }
 
 function startPinch() {
@@ -266,8 +505,8 @@ canvas.addEventListener('pointerdown', (e) => {
   pointers.set(e.pointerId, eventPos(e));
 
   if (pointers.size === 2) {
-    // 2本目の指が来たら、描きかけは取り消して拡大縮小にする
-    if (drag && drag.kind === 'move' && drag.moved) undo();
+    // 2本目の指が来たら、描きかけ・動かしかけは取り消して拡大縮小にする
+    if (drag && drag.kind === 'move') { doc = JSON.parse(undoStack.pop()); refresh(); }
     startPinch();
     draw();
     return;
@@ -277,32 +516,26 @@ canvas.addEventListener('pointerdown', (e) => {
   const [sx, sy] = eventPos(e);
   const [wx, wy] = toWorld(sx, sy);
 
-  if (mode === 'draw') {
-    if (rectToolIndexes().length === 0) {
+  if (mode === 'origin') {
+    placeOrigin(wx, wy);
+    drag = null;
+  } else if (mode === 'draw') {
+    if (!origin()) {
+      setMode('origin');
+      flash('先にワーク原点を置いてください');
       drag = null;
-      flash('長方形の金型がありません。「金型」で T1〜T3 のどれかを長方形にしてください');
       return;
     }
-    const [px, py] = clampToSheet(snapValue(wx), snapValue(wy));
-    drag = { kind: 'draw', start: [px, py], rect: null };
+    drag = { kind: 'stroke', raw: [{ x: wx, y: wy }] };
   } else {
-    const hit = hitTest(wx, wy);
-    selectedId = hit ? hit.id : null;
-    if (hit) {
-      snapshot();
-      drag = { kind: 'move', id: hit.id, start: [wx, wy], orig: [hit.x, hit.y], moved: false };
-    } else {
-      drag = null;
-    }
-    updateUi();
-    draw();
+    drag = { kind: 'press', hit: hitTest(sx, sy), start: [sx, sy], world: [wx, wy] };
   }
 });
 
 canvas.addEventListener('pointermove', (e) => {
   const pos = eventPos(e);
   const [wx, wy] = toWorld(pos[0], pos[1]);
-  $('st-pos').textContent = `X ${round(snapValue(wx))}  Y ${round(snapValue(wy))}`;
+  $('st-pos').textContent = origin() ? `X ${relX(snapAxis(wx, 'x'))}  Y ${relY(snapAxis(wy, 'y'))}` : '';
   if (!pointers.has(e.pointerId)) return;
   pointers.set(e.pointerId, pos);
   if (!drag) return;
@@ -319,24 +552,26 @@ canvas.addEventListener('pointermove', (e) => {
     view.fitted = false;
     drag.dist = dist; drag.mid = mid;
     draw();
-  } else if (drag.kind === 'draw') {
-    const [px, py] = clampToSheet(snapValue(wx), snapValue(wy));
-    const [x1, y1] = drag.start;
-    drag.rect = {
-      x: Math.min(x1, px), y: Math.min(y1, py), w: round(Math.abs(px - x1)), h: round(Math.abs(py - y1)),
-      tool: currentTool(),
-    };
+  } else if (drag.kind === 'stroke') {
+    drag.raw.push({ x: wx, y: wy });
     draw();
-  } else if (drag.kind === 'move') {
-    const r = doc.rects.find((q) => q.id === drag.id);
-    if (!r) return;
-    const nx = snapValue(drag.orig[0] + wx - drag.start[0]);
-    const ny = snapValue(drag.orig[1] + wy - drag.start[1]);
-    r.x = Math.min(Math.max(nx, 0), round(doc.sheet.w - r.w));
-    r.y = Math.min(Math.max(ny, 0), round(doc.sheet.h - r.h));
-    if (r.x !== drag.orig[0] || r.y !== drag.orig[1]) drag.moved = true;
-    updateProps();
-    renderCode();
+  } else if (drag.kind === 'press') {
+    // 点か線を押したまま 8px 動いたら、動かし始める
+    const h = drag.hit;
+    if (h && h.t !== 'dim' && Math.hypot(pos[0] - drag.start[0], pos[1] - drag.start[1]) > 8) {
+      snapshot();
+      const ids = h.t === 'point' ? [h.id] : [L(h.id).a, L(h.id).b];
+      drag = { kind: 'move', ids, world: drag.world, orig: doc.points.map((p) => ({ ...p })) };
+    }
+  }
+  if (drag && drag.kind === 'move') {
+    // 元の位置から、グリッドの間隔ずつ動かす
+    doc.points = drag.orig.map((p) => ({ ...p }));
+    const s = snapStep();
+    const dx = round(Math.round((wx - drag.world[0]) / s) * s);
+    const dy = round(Math.round((wy - drag.world[1]) / s) * s);
+    Geo.moveGroups(doc, drag.ids, dx, dy);
+    updateUi();
     draw();
   }
 });
@@ -350,23 +585,30 @@ function endPointer(e) {
     if (pointers.size < 2) drag = null;  // 指を全部離すまで描き始めない
     return;
   }
-  if (drag.kind === 'draw') {
-    const r = drag.rect;
-    if (r && r.w > 0 && r.h > 0 && e.type !== 'pointercancel') {
-      snapshot();
-      const rect = { id: nextId++, x: r.x, y: r.y, w: r.w, h: r.h, tool: r.tool };
-      doc.rects.push(rect);
-      selectedId = rect.id;
-      changed();
-    }
-  } else if (drag.kind === 'move') {
-    if (drag.moved) changed(); else undoStack.pop();  // 動かしていなければ取り消し履歴を残さない
-  }
+  const d = drag;
   drag = null;
-  draw();
+  if (d.kind === 'stroke') {
+    if (e.type !== 'pointercancel') commitStroke(d.raw);
+    draw();
+  } else if (d.kind === 'press') {
+    tapSelect(d.hit);
+  } else if (d.kind === 'move') {
+    const movedAny = doc.points.some((p, i) => p.x !== d.orig[i].x || p.y !== d.orig[i].y);
+    if (movedAny) changed(); else { undoStack.pop(); draw(); }
+  }
 }
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
+
+// タップで選ぶ: 同じものは外す、2 つまで足す、3 つ目は選び直し。寸法は 1 つだけ選ぶ。
+function tapSelect(hit) {
+  if (!hit) sel = [];
+  else if (isSel(hit.t, hit.id)) sel = sel.filter((s) => !(s.t === hit.t && s.id === hit.id));
+  else if (hit.t === 'dim' || sel.some((s) => s.t === 'dim') || sel.length >= 2) sel = [hit];
+  else sel = [...sel, hit];
+  updateUi();
+  draw();
+}
 
 // マウスのホイールで拡大縮小（PC での確認用）
 canvas.addEventListener('wheel', (e) => {
@@ -383,69 +625,218 @@ canvas.addEventListener('wheel', (e) => {
 // iOS Safari のジェスチャー（ページ全体の拡大）を止める
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 
+// ---- ワーク原点 ----
+// 初めて置くときは点を作る。動かすときは、原点とつながった（確定した）図形も一緒に動く。
+function placeOrigin(wx, wy) {
+  const s = snapStep();
+  const x = round(Math.round(wx / s) * s), y = round(Math.round(wy / s) * s);
+  snapshot();
+  const o = origin();
+  if (!o) {
+    const id = newId();
+    doc.points.push({ id, x, y });
+    doc.originId = id;
+  } else {
+    Geo.moveGroups(doc, [o.id], round(x - o.x), round(y - o.y));
+  }
+  setMode('draw');
+  changed();
+  flash('原点を置きました。原点から線をなぞると、確定した線になります');
+}
+
 // ---- 画面の部品 ----
 function setMode(m) {
   mode = m;
   document.querySelectorAll('button.mode').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
+  canvas.dataset.mode = m;
 }
 document.querySelectorAll('button.mode').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
 
-function selected() { return doc.rects.find((r) => r.id === selectedId) || null; }
+// ---- 寸法を入れる欄 ----
+const pName = (id) => (id === doc.originId ? '原点' : `P${id}`);
+const lName = (id) => `L${id}`;
+const dirName = (l) => (l.dir === 'h' ? '水平' : '垂直');
+const axisName = (a) => (a === 'x' ? 'X' : 'Y');
+function refName(r) { return r.t === 'point' ? pName(r.id) : lName(r.id); }
+// 要素の、方向 axis での代表の点（線は端の点。線の向きと直角な方向では両端が同じ値）
+function repPoint(r) { return r.t === 'point' ? r.id : L(r.id).a; }
+function dimKey(axis, refs) { return axis + ':' + refs.map((r) => r.t + r.id).sort().join(','); }
+function findDim(axis, refs) { const k = dimKey(axis, refs); return doc.dims.find((d) => dimKey(d.axis, d.refs) === k); }
 
-// ---- 四角穴（F3）と金型 ----
-// 長方形の金型の番号（0 始まり）
-function rectToolIndexes() {
-  return doc.tools.map((t, i) => (t.shape === 'rect' ? i : -1)).filter((i) => i >= 0);
-}
-// これから描く四角穴に使う金型。選んだものが長方形でなくなっていたら、最初の長方形の金型にする。
-let curTool = 0;
-function currentTool() {
-  const ok = rectToolIndexes();
-  if (!ok.includes(curTool)) curTool = ok.length ? ok[0] : 0;
-  return curTool;
-}
-// 四角穴の問題（無ければ null）
-function holeProblem(r) {
-  const t = doc.tools[r.tool];
-  if (!t || t.shape !== 'rect') return `T${(r.tool ?? 0) + 1} が長方形の金型ではありません`;
-  if (r.w < t.w || r.h < t.h) return `穴 ${round(r.w)} x ${round(r.h)} が金型 ${t.w} x ${t.h} より小さい`;
+// 選んだものから、入れられる寸法を作る
+// 戻り値 {title, rows:[{label, axis, a, b, kind, refs, prefer, signed}], note?}
+function dimOptions() {
+  const o = doc.originId;
+  const oRef = { t: 'point', id: o };
+  const fixedTxt = (ok) => (ok ? '確定' : '未確定');
+  if (sel.length === 1) {
+    const s = sel[0];
+    if (s.t === 'line') {
+      const l = L(s.id);
+      const along = l.dir === 'h' ? 'x' : 'y', across = l.dir === 'h' ? 'y' : 'x';
+      const a = P(l.a), b = P(l.b);
+      // 長さ: どちらも未確定なら左・下の端を残す
+      const rows = [{ label: '長さ', axis: along, a: l.a, b: l.b, kind: 'len', refs: [s], prefer: a[along] <= b[along] ? 'b' : 'a' }];
+      if (o != null) rows.push({ label: `原点から ${axisName(across)}`, axis: across, a: o, b: l.a, kind: 'o', refs: [oRef, s], prefer: 'b', signed: true });
+      return { title: `線 ${lName(l.id)}（${dirName(l)}・${fixedTxt(info.fixedLine(l))}）`, rows };
+    }
+    if (s.t === 'point') {
+      if (s.id === o) return { title: '原点', rows: [], note: '「原点」ボタンで、置き直せます。' };
+      return {
+        title: `点 ${pName(s.id)}（${fixedTxt(info.fixedPoint(s.id))}）`,
+        rows: o == null ? [] : [
+          { label: '原点から X', axis: 'x', a: o, b: s.id, kind: 'o', refs: [oRef, s], prefer: 'b', signed: true },
+          { label: '原点から Y', axis: 'y', a: o, b: s.id, kind: 'o', refs: [oRef, s], prefer: 'b', signed: true },
+        ],
+      };
+    }
+    if (s.t === 'dim') {
+      const d = D(s.id);
+      const names = d.refs.map(refName).join(' と ');
+      return {
+        title: `寸法 D${d.id}`,
+        rows: [{ label: `${names} の ${axisName(d.axis)}`, axis: d.axis, a: d.a, b: d.b, kind: d.kind, refs: d.refs, signed: d.kind === 'o' }],
+        isDim: true,
+      };
+    }
+  }
+  if (sel.length === 2) {
+    const [s1, s2] = sel;
+    const withOrigin = (s1.t === 'point' && s1.id === o) || (s2.t === 'point' && s2.id === o);
+    const kind = withOrigin ? 'o' : null;
+    // 原点を含むときは原点を a にする（符号付きの座標になる）
+    const [f, g] = s2.t === 'point' && s2.id === o ? [s2, s1] : [s1, s2];
+    const prefer = 'b';  // 2 つ目に選んだ側が動く
+    const signed = withOrigin;
+    if (f.t === 'point' && g.t === 'point') {
+      return {
+        title: `点 ${pName(f.id)} と 点 ${pName(g.id)}`,
+        rows: ['x', 'y'].map((axis) => ({ label: `${axisName(axis)} 方向の距離`, axis, a: f.id, b: g.id, kind: kind || 'pp', refs: [f, g], prefer, signed })),
+      };
+    }
+    if (f.t === 'line' && g.t === 'line') {
+      const l1 = L(f.id), l2 = L(g.id);
+      if (l1.dir !== l2.dir) return { title: `線 ${lName(l1.id)} と 線 ${lName(l2.id)}`, rows: [], note: '直角に交わる線どうしの距離は決められません。平行な線を 2 本選んでください。' };
+      const axis = l1.dir === 'h' ? 'y' : 'x';
+      return { title: `線 ${lName(l1.id)} と 線 ${lName(l2.id)}（平行）`, rows: [{ label: '線の間の距離', axis, a: l1.a, b: l2.a, kind: 'll', refs: [f, g], prefer }] };
+    }
+    if (f.t === 'dim' || g.t === 'dim') return { title: '', rows: [] };
+    // 点と線
+    const line = f.t === 'line' ? L(f.id) : L(g.id);
+    const axis = line.dir === 'h' ? 'y' : 'x';
+    return {
+      title: `${refName(f)} と ${refName(g)}`,
+      rows: [{ label: '点と線の距離', axis, a: repPoint(f), b: repPoint(g), kind: kind || 'pl', refs: [f, g], prefer, signed }],
+    };
+  }
   return null;
 }
-// 金型の選択欄を作り直す（長方形の金型だけを選べる）
-function fillToolSelect(sel, value, includeBad) {
-  const ok = rectToolIndexes();
-  const items = ok.map((i) => [i, `T${i + 1} ${toolText(doc.tools[i])}`]);
-  if (includeBad && !ok.includes(value)) items.unshift([value, `T${value + 1}（長方形ではない）`]);
-  const html = items.length ? items.map(([i, s]) => `<option value="${i}">${s}</option>`).join('')
-    : '<option value="">長方形の金型なし</option>';
-  if (sel.innerHTML !== html) sel.innerHTML = html;
-  sel.value = String(value);
-  sel.disabled = !items.length;
+
+// 欄を作り直す（選んだものが変わったとき・図形が変わったとき）
+let propsSig = '';
+function updateProps() {
+  const opt = dimOptions();
+  const box = $('props');
+  box.hidden = !opt;
+  if (!opt) { propsSig = ''; return; }
+  const sig = JSON.stringify(sel);
+  const rebuild = sig !== propsSig;
+  propsSig = sig;
+  if (rebuild) {
+    box.textContent = '';
+    const title = document.createElement('div');
+    title.className = 'props-title';
+    box.append(title);
+    opt.rows.forEach((r, i) => {
+      const lab = document.createElement('label');
+      lab.className = 'props-row';
+      lab.innerHTML = `<span class="pl"></span><input type="number" inputmode="decimal" step="any" data-i="${i}"><span class="unit">mm</span><span class="badge"></span>`;
+      lab.querySelector('.pl').textContent = r.label;
+      const input = lab.querySelector('input');
+      input.addEventListener('change', () => commitDim(i, input));
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } });
+      box.append(lab);
+    });
+    const note = document.createElement('div');
+    note.className = 'props-note';
+    box.append(note);
+    const btns = document.createElement('div');
+    btns.className = 'props-buttons';
+    if (opt.isDim) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.textContent = '寸法を消す';
+      del.addEventListener('click', deleteSelected);
+      btns.append(del);
+    }
+    box.append(btns);
+  }
+  box.querySelector('.props-title').textContent = opt.title;
+  box.querySelector('.props-note').textContent = opt.note ||
+    (opt.rows.length ? '数字を入れて Enter で決まります。紫の数字は決めた寸法。' : '');
+  opt.rows.forEach((r, i) => {
+    const input = box.querySelector(`input[data-i="${i}"]`);
+    const cur = P(r.b)[r.axis] - P(r.a)[r.axis];
+    const existing = findDim(r.axis, r.refs);
+    if (document.activeElement !== input) input.value = round(r.signed ? cur : Math.abs(cur));
+    const badge = input.parentElement.querySelector('.badge');
+    badge.textContent = existing ? '寸法' : '';
+  });
 }
 
-function updateProps() {
-  const r = selected();
-  $('props').hidden = !r;
+// 欄の値を寸法にする（すでにあれば値を変える）
+function commitDim(i, input) {
+  const opt = dimOptions();
+  const r = opt && opt.rows[i];
   if (!r) return;
-  // 開始点は左上。内部では左下を持っているので、Y は上端（y + h）を見せる。
-  const vals = { 'p-x': r.x, 'p-y': r.y + r.h, 'p-w': r.w, 'p-h': r.h };
-  for (const [id, v] of Object.entries(vals)) {
-    if (document.activeElement !== $(id)) $(id).value = round(v);
+  let v = parseFloat(input.value);
+  if (!Number.isFinite(v)) { updateUi(); return; }
+  v = round(v);
+  if (!r.signed && v < 0) v = -v;
+  if (r.kind === 'len' && v <= 0) { flash('長さは 0 より大きくしてください'); updateUi(); return; }
+  const cur = P(r.b)[r.axis] - P(r.a)[r.axis];
+  const existing = findDim(r.axis, r.refs);
+  // 向き（どちら側か）はいまの位置のまま
+  const sign = r.signed ? 1 : (existing ? Math.sign(existing.value) || 1 : Math.sign(cur) || 1);
+  const value = round(sign * v);
+  snapshot();
+  const err = existing ? Geo.setDimValue(doc, existing.id, value)
+    : Geo.addDim(doc, { id: newId(), axis: r.axis, a: r.a, b: r.b, value, kind: r.kind, refs: r.refs.map((q) => ({ ...q })) }, r.prefer);
+  if (err) {
+    doc = JSON.parse(undoStack.pop());
+    flash(err);
+    updateUi();
+    return;
   }
-  fillToolSelect($('p-tool'), r.tool, true);
-  const p = holeProblem(r);
-  $('p-warn').textContent = p || '';
-  $('p-warn').hidden = !p;
+  changed();
+}
+
+// 選んだものを消す: 線（とその端の点）、点（につながる線）、寸法
+function deleteSelected() {
+  if (!sel.length) return;
+  snapshot();
+  const lineIds = new Set(sel.filter((s) => s.t === 'line').map((s) => s.id));
+  for (const s of sel) {
+    if (s.t === 'point' && s.id !== doc.originId) {
+      for (const l of doc.lines) if (l.a === s.id || l.b === s.id) lineIds.add(l.id);
+    }
+  }
+  const dimIds = new Set(sel.filter((s) => s.t === 'dim').map((s) => s.id));
+  doc.dims = doc.dims.filter((d) => !dimIds.has(d.id));
+  if (lineIds.size) Geo.deleteLines(doc, [...lineIds]);
+  sel = [];
+  changed();
 }
 
 function updateUi() {
-  $('btn-delete').disabled = !selected();
+  dropMissingSelection();
+  $('btn-delete').disabled = !sel.some((s) => s.t !== 'point' || s.id !== doc.originId);
   $('btn-undo').disabled = !undoStack.length;
   $('sheet-w').value = doc.sheet.w;
   $('sheet-h').value = doc.sheet.h;
   $('st-name').textContent = (doc.name || '名前なし') + (dirty ? ' *' : '');
-  $('st-count').textContent = `四角穴 ${doc.rects.length} 個`;
-  fillToolSelect($('cur-tool'), currentTool(), false);
+  const fixedLines = doc.lines.filter((l) => info.fixedLine(l)).length;
+  $('st-count').textContent = `線 ${doc.lines.length} 本（確定 ${fixedLines}）・寸法 ${doc.dims.length}`;
   $('st-prog').textContent = doc.program == null ? 'プログラム番号なし' : programText(doc.program);
   $('st-tools').textContent = doc.tools.map((t, i) => (t.shape === 'none' ? null : `T${i + 1} ${toolText(t)}`))
     .filter(Boolean).join('　') || '金型なし';
@@ -453,52 +844,60 @@ function updateUi() {
   renderCode();
 }
 
-// ---- コードの区画 ----
-// 機械に手で打ち込む順に並べる。四角穴は F3 のあとに
-// 左上の開始点 → 穴の XY 寸法 → 金型の XY 寸法 を入れる。
+// ---- 図形データの区画 ----
+// いまは図形の確認用に、点・線・寸法を原点からの座標で並べる（プログラムの自動作成は次の段階）。
 function fmt(v) {
   return String(round(v));
 }
-function xy(x, y, note) {
-  return `  ${('X' + fmt(x)).padEnd(8)}${('Y' + fmt(y)).padEnd(8)}; ${note}`;
-}
 function genCode() {
-  const lines = [];  // {text, rectId?, comment?}
-  const add = (text, rectId, comment = false) => lines.push({ text, rectId, comment });
+  const lines = [];  // {text, key?, comment?}
+  const add = (text, key, comment = false) => lines.push({ text, key, comment });
   add(`; セットプレス CAM v${APP_VERSION}`, null, true);
   add(`; 図面 ${doc.name || '名前なし'}  板 ${fmt(doc.sheet.w)} x ${fmt(doc.sheet.h)} mm`, null, true);
   add(programText(doc.program), null);
   doc.tools.forEach((t, i) => add(`; T${i + 1} ${toolText(t)}`, null, true));
-  if (doc.rects.length) add('; F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法', null, true);
-  doc.rects.forEach((r, i) => {
-    const t = doc.tools[r.tool];
+  add('', null);
+  if (!origin()) { add('; ワーク原点がありません', null, true); return lines; }
+  add('; 点（原点からの座標）  ● 確定', null, true);
+  for (const p of doc.points) {
+    if (p.id === doc.originId) continue;
+    const mark = info.fixedPoint(p.id) ? '●' : '○';
+    add(`${pName(p.id).padEnd(5)}${mark} X${fmt(relX(p.x)).padEnd(8)}Y${fmt(relY(p.y))}`, `point:${p.id}`);
+  }
+  add('', null);
+  add('; 線', null, true);
+  for (const l of doc.lines) {
+    const a = P(l.a), b = P(l.b);
+    const len = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+    const mark = info.fixedLine(l) ? '●' : '○';
+    add(`${lName(l.id).padEnd(5)}${mark} ${dirName(l)} ${pName(l.a)}-${pName(l.b)}  長さ ${fmt(len)}`, `line:${l.id}`);
+  }
+  if (!doc.lines.length) add('; 線がありません', null, true);
+  if (doc.dims.length) {
     add('', null);
-    add(`; 四角穴 ${i + 1}`, r.id, true);
-    const p = holeProblem(r);
-    if (p) add(`; ※ ${p}`, r.id, true);
-    add(`T${r.tool + 1}`, r.id);
-    add('F3', r.id);
-    add(xy(r.x, r.y + r.h, '開始点'), r.id);
-    add(xy(r.w, r.h, '寸法'), r.id);
-    if (t && t.shape === 'rect') add(xy(t.w, t.h, '金型'), r.id);
-    else add('  ?       ?       ; 金型', r.id);
-  });
-  if (!doc.rects.length) { add('', null); add('; 四角穴がありません', null, true); }
+    add('; 寸法', null, true);
+    for (const d of doc.dims) {
+      const v = d.kind === 'o' ? d.value : Math.abs(d.value);
+      const what = d.kind === 'len' ? `${refName(d.refs[0])} の長さ` : `${d.refs.map(refName).join('-')} ${axisName(d.axis)}`;
+      add(`D${String(d.id).padEnd(4)}${what}  ${fmt(v)}`, `dim:${d.id}`);
+    }
+  }
   return lines;
 }
 
-let lastCodeSel = null;
+let lastCodeSel = '';
 function renderCode() {
   const box = $('code');
   if (!box) return;  // 更新の途中で古い index.html と組み合わさったとき
   const lines = genCode();
+  const selKeys = new Set(sel.map((s) => `${s.t}:${s.id}`));
   box.textContent = '';
   let firstSel = null;
   lines.forEach((l, i) => {
     const row = document.createElement('div');
-    row.className = 'ln' + (l.comment ? ' cmt' : '') + (l.rectId != null ? ' rect' : '') +
-      (l.rectId != null && l.rectId === selectedId ? ' sel' : '');
-    if (l.rectId != null) row.dataset.rect = l.rectId;
+    const on = l.key && selKeys.has(l.key);
+    row.className = 'ln' + (l.comment ? ' cmt' : '') + (l.key ? ' rect' : '') + (on ? ' sel' : '');
+    if (l.key) row.dataset.key = l.key;
     const no = document.createElement('span');
     no.className = 'no';
     no.textContent = i + 1;
@@ -507,18 +906,20 @@ function renderCode() {
     tx.textContent = l.text;
     row.append(no, tx);
     box.append(row);
-    if (!firstSel && row.classList.contains('sel')) firstSel = row;
+    if (!firstSel && on) firstSel = row;
   });
-  // 選んだ四角穴が変わったときだけ、その行まで送る
-  if (selectedId !== lastCodeSel && firstSel) firstSel.scrollIntoView({ block: 'nearest' });
-  lastCodeSel = selectedId;
+  // 選んだものが変わったときだけ、その行まで送る
+  const sig = [...selKeys].join();
+  if (sig !== lastCodeSel && firstSel) firstSel.scrollIntoView({ block: 'nearest' });
+  lastCodeSel = sig;
 }
 
-// 行をタップすると、その四角穴を選ぶ
+// 行をタップすると、その要素を選ぶ
 $('code')?.addEventListener('click', (e) => {
   const row = e.target.closest('.ln.rect');
   if (!row || (window.getSelection && String(window.getSelection()).length)) return;
-  selectedId = Number(row.dataset.rect);
+  const [t, id] = row.dataset.key.split(':');
+  sel = [{ t, id: Number(id) }];
   updateUi();
   draw();
 });
@@ -527,7 +928,7 @@ $('btn-copy')?.addEventListener('click', async () => {
   const text = genCode().map((l) => l.text).join('\n') + '\n';
   try {
     await navigator.clipboard.writeText(text);
-    flash('コードをコピーしました');
+    flash('コピーしました');
   } catch (e) {
     flash('コピーできませんでした');
   }
@@ -536,7 +937,7 @@ $('btn-copy')?.addEventListener('click', async () => {
 function flash(msg) {
   $('st-msg').textContent = msg;
   clearTimeout(flash.t);
-  flash.t = setTimeout(() => { $('st-msg').textContent = ''; }, 3000);
+  flash.t = setTimeout(() => { $('st-msg').textContent = ''; }, 4000);
 }
 
 // 数値の入力欄: Enter・フォーカスが外れたときに確定し、範囲内に直す
@@ -560,48 +961,10 @@ numberInput('sheet-h', () => 10, () => 5000, (v) => {
   if (v === doc.sheet.h) return;
   snapshot(); doc.sheet.h = v; changed(); fitView();
 });
-// 選んだ四角穴の欄。開始点（左上）を基準にするので、Y 寸法を変えても開始点は動かさない。
-// set(r, v) は新しい {x, y, w, h} を返す。
-function propInput(id, min, max, set) {
-  numberInput(id, min, max, (v) => {
-    const r = selected();
-    if (!r) { updateUi(); return; }
-    const n = set(r, v);
-    if (n.x === r.x && n.y === r.y && n.w === r.w && n.h === r.h) { updateUi(); return; }
-    snapshot(); Object.assign(r, n); changed();
-  });
-}
-const rectTop = (r) => round(r.y + r.h);
-propInput('p-x', () => 0, () => doc.sheet.w - (selected()?.w || 0),
-  (r, v) => ({ ...r, x: v }));
-propInput('p-y', () => selected()?.h || 0, () => doc.sheet.h,
-  (r, v) => ({ ...r, y: round(v - r.h) }));
-propInput('p-w', () => 0.1, () => doc.sheet.w - (selected()?.x || 0),
-  (r, v) => ({ ...r, w: v }));
-propInput('p-h', () => 0.1, () => rectTop(selected() || { y: 0, h: 0 }),
-  (r, v) => ({ ...r, h: v, y: round(rectTop(r) - v) }));
-
-$('p-tool').addEventListener('change', () => {
-  const r = selected();
-  const v = Number($('p-tool').value);
-  if (!r || r.tool === v) return;
-  snapshot(); r.tool = v; curTool = v; changed();
-});
-$('cur-tool').addEventListener('change', () => {
-  curTool = Number($('cur-tool').value);
-  updateUi();
-});
 
 $('btn-undo').addEventListener('click', undo);
 $('btn-fit').addEventListener('click', fitView);
-$('btn-delete').addEventListener('click', () => {
-  const r = selected();
-  if (!r) return;
-  snapshot();
-  doc.rects = doc.rects.filter((q) => q !== r);
-  selectedId = null;
-  changed();
-});
+$('btn-delete').addEventListener('click', deleteSelected);
 
 // ---- 保存・読み込み（端末のブラウザ内に保存） ----
 function loadStore() {
@@ -622,28 +985,43 @@ function confirmBox(text, okLabel = 'OK') {
   });
 }
 
+// 保存データを読み込む。v0.4 までの四角穴（rects）はテスト用だったので読み込まない。
 function loadDoc(d) {
-  if (!d || !d.sheet || !Array.isArray(d.rects)) throw new Error('図面の形式が違います');
+  if (!d || !d.sheet) throw new Error('図面の形式が違います');
   const prog = Number(d.program);
+  const num = (v) => round(Number(v));
+  const points = (Array.isArray(d.points) ? d.points : [])
+    .map((p) => ({ id: Number(p.id), x: num(p.x), y: num(p.y) }))
+    .filter((p) => Number.isInteger(p.id) && Number.isFinite(p.x) && Number.isFinite(p.y));
+  const ids = new Set(points.map((p) => p.id));
+  const lines = (Array.isArray(d.lines) ? d.lines : [])
+    .map((l) => ({ id: Number(l.id), a: Number(l.a), b: Number(l.b), dir: l.dir === 'v' ? 'v' : 'h' }))
+    .filter((l) => ids.has(l.a) && ids.has(l.b) && l.a !== l.b);
+  const lineIds = new Set(lines.map((l) => l.id));
+  const refOk = (r) => r && (r.t === 'point' ? ids.has(r.id) : r.t === 'line' && lineIds.has(r.id));
+  const dims = (Array.isArray(d.dims) ? d.dims : [])
+    .map((q) => ({
+      id: Number(q.id), axis: q.axis === 'y' ? 'y' : 'x', a: Number(q.a), b: Number(q.b), value: num(q.value),
+      kind: String(q.kind || 'pp'), refs: (q.refs || []).map((r) => ({ t: r.t, id: Number(r.id) })),
+    }))
+    .filter((q) => ids.has(q.a) && ids.has(q.b) && Number.isFinite(q.value) && q.refs.length && q.refs.every(refOk));
+  const originId = ids.has(Number(d.originId)) ? Number(d.originId) : null;
+  const maxId = Math.max(0, ...points.map((p) => p.id), ...lines.map((l) => l.id), ...dims.map((q) => q.id));
   doc = {
-    version: 2,
+    version: 3,
     name: String(d.name || ''),
     program: Number.isInteger(prog) && prog >= PROGRAM_MIN && prog <= PROGRAM_MAX ? prog : null,
     tools: normalizeTools(d.tools),
     sheet: { w: Number(d.sheet.w) || 1000, h: Number(d.sheet.h) || 500 },
-    rects: d.rects.map((r, i) => ({
-      id: i + 1, x: Number(r.x), y: Number(r.y), w: Number(r.w), h: Number(r.h),
-      // 金型の無い古い図面は、最初の長方形の金型（無ければ T1）にする
-      tool: Number.isInteger(r.tool) && r.tool >= 0 && r.tool < TOOL_COUNT ? r.tool : firstRectTool(d.tools),
-    }))
-      .filter((r) => [r.x, r.y, r.w, r.h].every(Number.isFinite) && r.w > 0 && r.h > 0),
+    originId, points, lines, dims,
+    nextId: Math.max(Number(d.nextId) || 1, maxId + 1),
   };
-  nextId = doc.rects.length + 1;
-  selectedId = null;
+  sel = [];
   undoStack.length = 0;
   dirty = false;
   saveCurrent();
-  updateUi();
+  setMode(originId == null ? 'origin' : 'draw');
+  refresh();
   fitView();
 }
 
@@ -694,7 +1072,8 @@ function renderOpenList() {
     const small = document.createElement('small');
     const d = new Date(item.savedAt);
     const prog = item.doc.program != null ? `${programText(item.doc.program)}・` : '';
-    small.textContent = `${prog}${d.toLocaleString('ja-JP')}・四角穴 ${item.doc.rects.length} 個・${item.doc.sheet.w}×${item.doc.sheet.h} mm`;
+    const nLines = Array.isArray(item.doc.lines) ? item.doc.lines.length : 0;
+    small.textContent = `${prog}${d.toLocaleString('ja-JP')}・線 ${nLines} 本・${item.doc.sheet.w}×${item.doc.sheet.h} mm`;
     info.append(small);
     const open = document.createElement('button');
     open.type = 'button';
@@ -879,7 +1258,8 @@ window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault()
     const cur = JSON.parse(localStorage.getItem(CURRENT_KEY));
     if (cur && cur.doc) { resize(); loadDoc(cur.doc); dirty = !!cur.dirty; saveCurrent(); updateUi(); return; }
   } catch (e) { /* 壊れていたら新しく始める */ }
-  updateUi();
+  setMode('origin');
+  refresh();
   resize();
   openProjectDialog('new');  // 初めて開いたときは、プログラム番号と金型から決める
 })();

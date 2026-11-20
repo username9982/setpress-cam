@@ -5,7 +5,7 @@
 書き換える所:
 - app.js     の APP_VERSION
 - sw.js      の CACHE_NAME
-- index.html の style.css?v= / app.js?v=
+- index.html の style.css?v= / geom.js?v= / app.js?v=
   （新しい index.html が古い style.css や app.js と組み合わさらないように、版を URL に付ける）
 """
 import re
@@ -18,6 +18,7 @@ RULES = [
     ('app.js', r"(APP_VERSION = ')[^']+(')"),
     ('sw.js', r"(CACHE_NAME = 'setpress-cam-)[^']+(')"),
     ('index.html', r'(href="style\.css\?v=)[^"]+(")'),
+    ('index.html', r'(src="geom\.js\?v=)[^"]+(")'),
     ('index.html', r'(src="app\.js\?v=)[^"]+(")'),
 ]
 

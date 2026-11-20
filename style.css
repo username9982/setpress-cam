@@ -148,11 +148,16 @@ input[type=number], input[type=text], select {
 #props[hidden] { display: none; }
 #props label { display: grid; grid-template-columns: 3em 110px; align-items: center; }
 #props input { width: 110px; }
-.props-title { font-weight: 700; }
-.props-sub { font-size: 13px; font-weight: 600; color: #4a5a6a; margin-top: 2px; }
-#p-tool { width: 100%; max-width: 170px; }
-.props-warn { max-width: 170px; font-size: 13px; font-weight: 600; color: #b5473c; }
-#cur-tool { max-width: 190px; }
+.props-title { font-weight: 700; max-width: 300px; }
+#props label.props-row { display: flex; align-items: center; gap: 6px; }
+#props .props-row .pl { min-width: 8em; max-width: 12em; }
+#props .props-row input { width: 100px; }
+#props .props-row .unit { color: #667; font-size: 14px; }
+#props .props-row .badge { min-width: 2.5em; font-size: 12px; font-weight: 700; color: #7a4fb3; }
+#props .props-note { max-width: 300px; }
+.props-buttons { display: flex; gap: 8px; }
+.props-buttons:empty { display: none; }
+.props-buttons button { background: #b5473c; }
 .props-note { font-size: 13px; color: #667; }
 
 #status {
