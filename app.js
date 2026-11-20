@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.10.2';
+const APP_VERSION = '0.10.3';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -837,16 +837,6 @@ function findDim(axis, refs, kind) { const k = dimKey(axis, refs, kind); return 
 // signed: 向きのある値（原点からの距離）。neg: 表示の値が b − a の逆（原点からの Y は下へ正）
 function dimOptions() {
   const fixedTxt = (ok) => (ok ? '確定' : '未確定');
-  // 外形の原点からの寸法の欄。原点の基準の点（いちばん左・いちばん上の点）からの距離にする
-  const originRow = (pid, axis, elem) => {
-    const k = info.owner.get(pid);
-    if (k == null) return [];
-    const ref = info.outers[k].ref[axis];
-    return [{
-      label: `S${k + 1} 原点から ${axisName(axis)}`, axis, a: ref, b: pid, kind: 'o',
-      refs: [{ t: 'point', id: ref }, elem], prefer: 'b', signed: true, neg: axis === 'y',
-    }];
-  };
   // 線の長さは左・上の端を残す
   const lenPrefer = (axis, a, b) => (axis === 'x' ? (P(a).x <= P(b).x ? 'b' : 'a') : (P(a).y >= P(b).y ? 'b' : 'a'));
   // 板の原点から外形の原点までの寸法の欄
@@ -868,16 +858,14 @@ function dimOptions() {
     }
     if (s.t === 'line') {
       const l = L(s.id);
-      const along = l.dir === 'h' ? 'x' : 'y', across = l.dir === 'h' ? 'y' : 'x';
+      const along = l.dir === 'h' ? 'x' : 'y';
       const rows = [{ label: '長さ', axis: along, a: l.a, b: l.b, kind: 'len', refs: [s], prefer: lenPrefer(along, l.a, l.b) }];
-      rows.push(...originRow(l.a, across, s));
-      return { title: `線 ${lName(l.id)}（${dirName(l)}・${fixedTxt(info.fixedLine(l))}）`, rows,
-        note: info.owner.get(l.a) == null ? '閉じた図形に入っていないので、原点からの距離は決められません。' : null };
+      return { title: `線 ${lName(l.id)}（${dirName(l)}・${fixedTxt(info.fixedLine(l))}）`, rows };
     }
     if (s.t === 'point') {
-      const rows = [...originRow(s.id, 'x', s), ...originRow(s.id, 'y', s)];
-      return { title: `点 ${pName(s.id)}（${fixedTxt(info.fixedPoint(s.id))}）`, rows,
-        note: rows.length ? null : '閉じた図形に入っていないので、原点からの距離は決められません。' };
+      // 外形の原点からの距離の欄はなくした（v0.10.3）。ほかの点・線を選ぶと距離を入れられる
+      return { title: `点 ${pName(s.id)}（${fixedTxt(info.fixedPoint(s.id))}）`, rows: [],
+        note: 'もう 1 つ点か線を選ぶと、その間の距離を入れられます。' };
     }
     if (s.t === 'dim') {
       const d = D(s.id);
