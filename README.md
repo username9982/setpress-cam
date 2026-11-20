@@ -50,5 +50,12 @@ Service Worker（オフライン動作）は **HTTPS** でしか動かないた�
 
 ## 更新するとき
 
-中身を変えたら、`app.js` の `APP_VERSION` と `sw.js` の `CACHE_NAME` の版を両方上げる。
+中身を変えたら、版を上げる。
+
+```
+python tools/bump_version.py 0.2.1
+```
+
+`app.js` の `APP_VERSION`、`sw.js` の `CACHE_NAME`、`index.html` の `style.css?v=` / `app.js?v=` をまとめて書き換える。
+URL に版を付けるのは、更新の直後に新しい `index.html` と古い `style.css`（キャッシュに残ったもの）が組み合わさって画面が崩れるのを防ぐため（v0.2.0 で、描く領域が消えた）。
 Service Worker はネットにつながっていれば新しいファイルを取り、つながっていなければ前に取ったファイルで動く。

@@ -3,7 +3,7 @@
 // セットプレス CAM — 動作確認版: 四角形を描いて保存する。
 // 座標はすべて mm。原点は板の左下、Y は上向き（機械の座標に合わせる）。
 
-const APP_VERSION = '0.2.0';
+const APP_VERSION = '0.2.1';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -369,6 +369,7 @@ function genCode() {
 let lastCodeSel = null;
 function renderCode() {
   const box = $('code');
+  if (!box) return;  // 更新の途中で古い index.html と組み合わさったとき
   const lines = genCode();
   box.textContent = '';
   let firstSel = null;
@@ -393,7 +394,7 @@ function renderCode() {
 }
 
 // 行をタップすると、その四角形を選ぶ
-$('code').addEventListener('click', (e) => {
+$('code')?.addEventListener('click', (e) => {
   const row = e.target.closest('.ln.rect');
   if (!row || (window.getSelection && String(window.getSelection()).length)) return;
   selectedId = Number(row.dataset.rect);
@@ -401,7 +402,7 @@ $('code').addEventListener('click', (e) => {
   draw();
 });
 
-$('btn-copy').addEventListener('click', async () => {
+$('btn-copy')?.addEventListener('click', async () => {
   const text = genCode().map((l) => l.text).join('\n') + '\n';
   try {
     await navigator.clipboard.writeText(text);
