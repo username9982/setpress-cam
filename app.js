@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.14.1';
+const APP_VERSION = '0.14.2';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -890,6 +890,7 @@ function setMode(m) {
   document.querySelectorAll('button.mode').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
   canvas.dataset.mode = m;
   $('layout-panel').hidden = m !== 'layout';  // 割付のときだけ左に割付の区画を出す
+  if (m !== 'layout' && layoutHit) { layoutHit = null; renderCode(); }
   updateLayoutPanel();
   draw();
 }
@@ -1129,7 +1130,35 @@ function updateUi() {
 // ---- 割付 ----
 // 「割付」で図形（外形）をタップして選び、「自動割付」で穴を F3 で抜くプログラムを作る。
 let layoutWork = null;  // 選んだ外形の番号（info.outers の番号）
+let layoutHit = null;  // ハイライトする F3 {work: 外形を表す点, i: 何回目か}
+const hitKey = (work, i) => `hit:${work}:${i}`;
+// 割付したあとは、抜く長方形をタップすると、その F3 1 回で抜く範囲をハイライトする。
+// 長方形が重なる所は、タップするたびに次の長方形に移る。
+function hitsAt(x, y) {
+  const list = [];
+  for (const lay of doc.layouts) {
+    if (info.owner.get(lay.work) == null) continue;
+    lay.hits.forEach((h, i) => {
+      if (x >= h.x0 - 1e-6 && x <= h.x1 + 1e-6 && y >= h.y0 - 1e-6 && y <= h.y1 + 1e-6) list.push({ work: lay.work, i });
+    });
+  }
+  return list;
+}
+function selectHit(h) {
+  layoutHit = h;
+  if (h) layoutWork = info.owner.get(h.work) ?? layoutWork;
+  updateLayoutPanel();
+  renderCode();
+  draw();
+}
 function tapWork(hit, world) {
+  const cands = hit && hit.t === 'origin' ? [] : hitsAt(world[0], world[1]);
+  if (cands.length) {
+    const cur = layoutHit ? cands.findIndex((c) => c.work === layoutHit.work && c.i === layoutHit.i) : -1;
+    selectHit(cands[(cur + 1) % cands.length]);
+    return;
+  }
+  layoutHit = null;
   let k = hit && hit.t === 'origin' ? hit.id : info.outerAt(world[0], world[1]);
   if (k == null && hit && hit.t === 'line') k = info.owner.get(L(hit.id).a) ?? null;
   if (k == null && hit && hit.t === 'point') k = info.owner.get(hit.id) ?? null;
@@ -1229,6 +1258,7 @@ function autoLayout() {
   const key = workKey(k);
   doc.layouts = doc.layouts.filter((q) => info.owner.get(q.work) !== k);
   doc.layouts.push({ work: key, src: holeSrc(k), hits, warn });
+  layoutHit = null;
   changed();
   flash(holes.length ? `S${k + 1} の穴 ${holes.length} 個を F3 ${hits.length} 回で割り付けました` : `S${k + 1} には穴がありません`);
 }
@@ -1237,6 +1267,7 @@ function clearLayout() {
   if (k == null || !layoutOf(k)) return;
   snapshot();
   doc.layouts = doc.layouts.filter((q) => info.owner.get(q.work) !== k);
+  layoutHit = null;
   changed();
 }
 $('btn-autolayout').addEventListener('click', autoLayout);
@@ -1313,6 +1344,23 @@ function drawLayout() {
       ctx.restore();
     });
   }
+  // ハイライト: 選んだ F3 1 回で抜く範囲
+  const lay = layoutHit && doc.layouts.find((q) => q.work === layoutHit.work);
+  const h = lay && lay.hits[layoutHit.i];
+  if (h && info.owner.get(lay.work) != null) {
+    const [ax, ay] = toScreen(h.x0, h.y1), [bx, by] = toScreen(h.x1, h.y0);
+    ctx.save();
+    ctx.fillStyle = 'rgba(232, 137, 12, 0.35)';
+    ctx.fillRect(ax, ay, bx - ax, by - ay);
+    ctx.strokeStyle = COLOR.selected;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(ax, ay, bx - ax, by - ay);
+    ctx.fillStyle = COLOR.selected;
+    ctx.font = 'bold 13px sans-serif';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`F3 ${layoutHit.i + 1}`, ax, ay - 3);
+    ctx.restore();
+  }
 }
 
 // ---- 図形データの区画 ----
@@ -1340,12 +1388,13 @@ function genCode() {
     let curTool = null;
     lay.hits.forEach((h, i) => {
       const t = h.tool == null ? null : doc.tools[h.tool];
-      add(`; ${i + 1}`, null, true);
-      if (h.tool != null && h.tool !== curTool) { add(`T${h.tool + 1}`, null); curTool = h.tool; }
-      add('F3', null);
-      add(xy(h.x0 - o.x, o.y - h.y1, '開始点'), null);
-      add(xy(h.x1 - h.x0, h.y1 - h.y0, '寸法'), null);
-      add(t ? xy(t.w, t.h, '金型') : '  ?       ?       ; 金型（入る長方形の金型がない）', null);
+      const hk = hitKey(lay.work, i);  // この F3 のまとまりの行をタップすると、抜く範囲をハイライトする
+      add(`; ${i + 1}`, hk, true);
+      if (h.tool != null && h.tool !== curTool) { add(`T${h.tool + 1}`, hk); curTool = h.tool; }
+      add('F3', hk);
+      add(xy(h.x0 - o.x, o.y - h.y1, '開始点'), hk);
+      add(xy(h.x1 - h.x0, h.y1 - h.y0, '寸法'), hk);
+      add(t ? xy(t.w, t.h, '金型') : '  ?       ?       ; 金型（入る長方形の金型がない）', hk);
     });
     if (!lay.hits.length) add('; 穴がありません', null, true);
   }
@@ -1412,6 +1461,7 @@ function renderCode() {
   if (!box) return;  // 更新の途中で古い index.html と組み合わさったとき
   const lines = genCode();
   const selKeys = new Set(sel.map((s) => `${s.t}:${s.id}`));
+  if (layoutHit) selKeys.add(hitKey(layoutHit.work, layoutHit.i));
   box.textContent = '';
   let firstSel = null;
   lines.forEach((l, i) => {
@@ -1439,6 +1489,12 @@ function renderCode() {
 $('code')?.addEventListener('click', (e) => {
   const row = e.target.closest('.ln.rect');
   if (!row || (window.getSelection && String(window.getSelection()).length)) return;
+  if (row.dataset.key.startsWith('hit:')) {  // F3 のまとまり: 「割付」にして抜く範囲をハイライトする
+    const [, work, i] = row.dataset.key.split(':').map(Number);
+    if (mode !== 'layout') setMode('layout');
+    selectHit({ work, i });
+    return;
+  }
   const [t, id] = row.dataset.key.split(':');
   setMode('dim');
   sel = [{ t, id: Number(id) }];
