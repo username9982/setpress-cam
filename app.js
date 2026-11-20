@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.17.5';
+const APP_VERSION = '0.17.6';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1281,15 +1281,18 @@ function pickRectTool(w, h) {
 // 穴を長方形に分け、継ぎ目で金型寸法の約 1/3 重ねる。
 // 抜いた輪郭とこれから抜く輪郭がぴったり接すると金型に良くないため。重ねた先が穴からはみ出す（抜かない所に
 // ぶつかる）ときは、反対側の長方形を伸ばす。どちらもはみ出すときは重ねず、数を返す（open）。
-// 水平の帯・垂直の帯の 2 通りで試し、重ねられない継ぎ目が少なく、長方形が少ないほうを使う。
-function splitHole(poly) {
+// 水平の帯・垂直の帯の 2 通りで試し、重ねられない継ぎ目が少なく、金型が入らない所が少なく、長方形が少ないほうを使う。
+// fix: 切り欠きで、長方形を外形の外へ広げる処理（広げたあとの大きさで金型・重ねる量・良し悪しを決める）
+function splitHole(poly, fix = (r) => r) {
   const E = 1e-6, step = (v) => Math.max(0.1, Math.round(v * 10) / 10);
   // 長方形の向き d（'x' か 'y'）の、重ねる量。金型があれば金型、なければ長方形の寸法の 1/3
   const ovOf = (r, d) => {
-    const t = pickRectTool(round(r.x1 - r.x0), round(r.y1 - r.y0));
-    const size = t == null ? (d === 'x' ? r.x1 - r.x0 : r.y1 - r.y0) : (d === 'x' ? doc.tools[t].w : doc.tools[t].h);
+    const f = fix(r);
+    const t = pickRectTool(round(f.x1 - f.x0), round(f.y1 - f.y0));
+    const size = t == null ? (d === 'x' ? f.x1 - f.x0 : f.y1 - f.y0) : (d === 'x' ? doc.tools[t].w : doc.tools[t].h);
     return step(size / 3);
   };
+  const noTool = (r) => pickRectTool(round(r.x1 - r.x0), round(r.y1 - r.y0)) == null;
   let best = null;
   for (const part of Geo.rectPartitions(poly)) {
     const base = part.map((r) => ({ ...r }));
@@ -1317,13 +1320,14 @@ function splitHole(poly) {
         if (!done) open++;
       }
     }
-    // 金型が入らない小さい長方形は、穴からはみ出さない所まで広げる
+    // 金型が入らない小さい長方形は、穴からはみ出さない所まで広げる。そのあと外へ広げる（切り欠き）
     for (let k = 0; k < rects.length; k++) {
-      const r = rects[k];
-      if (pickRectTool(round(r.x1 - r.x0), round(r.y1 - r.y0)) == null) rects[k] = Geo.rectGrow(poly, r);
+      if (noTool(fix(rects[k]))) rects[k] = Geo.rectGrow(poly, rects[k]);
+      rects[k] = fix(rects[k]);
     }
-    const missing = rects.filter((r) => pickRectTool(round(r.x1 - r.x0), round(r.y1 - r.y0)) == null).length;
-    const score = [open, missing, rects.length];
+    const missing = rects.filter(noTool).length;
+    const area = round(rects.reduce((a, r) => a + (r.x1 - r.x0) * (r.y1 - r.y0), 0));  // 2 度抜く所が少ないほうがよい
+    const score = [open, missing, rects.length, area];
     const better = !best || (() => { for (let n = 0; n < score.length; n++) if (score[n] !== best.score[n]) return score[n] < best.score[n]; return false; })();
     if (better) best = { rects, open, score };
   }
@@ -1389,10 +1393,10 @@ function autoLayout() {
       // 外形を囲む四角の中の部分（実際に抜く所）を長方形に分け、四角の辺に乗っている側を外へ約 1/3 広げる。
       // 描いた切り欠きがどこまで外へ出ていても、広げる量は同じ
       if (!poly) return;
-      const { rects, open } = splitHole(poly);
-      if (open) warn.push(`切り欠き ${i + 1} の継ぎ目 ${open} か所は、抜かない所にぶつかるので重ねていません。`);
-      let blocked = false;
-      for (const r0 of rects) {
+      // 外形を囲む四角の辺に乗っている側を外へ約 1/3 広げる。入る長方形の金型がないときは、1/3 にこだわらず
+      // 外へはみ出させて金型が入る大きさにする。ほかのワークにぶつかるときは広げない（blocked）。
+      // 分け方を選ぶ前にこの広げ方を当てるので、細い所も外へ広げたあとの形で、継ぎ目の重ねが約 1/3 になる分け方を選べる
+      const fix = (r0) => {
         const r = { ...r0 };
         if (Math.abs(r0.x0 - box.x0) < E) r.x0 -= ovx;
         if (Math.abs(r0.x1 - box.x1) < E) r.x1 += ovx;
@@ -1400,13 +1404,19 @@ function autoLayout() {
         if (Math.abs(r0.y1 - box.y1) < E) r.y1 += ovy;
         const rp = [{ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }];
         const hitOther = others.some((p) => Geo.overlaps(p, rp));
-        if (hitOther) blocked = true;
-        let use = hitOther ? r0 : r;
-        // 入る長方形の金型がないときは、1/3 の重なりにこだわらず、外形の外へはみ出させて金型が入る大きさにする
+        let use = hitOther ? { ...r0 } : r;
         if (pickRectTool(round(use.x1 - use.x0), round(use.y1 - use.y0)) == null) {
           const grown = growOutward(use, r0, box, others);
           if (grown) use = grown;
         }
+        if (hitOther) use.blocked = true;
+        return use;
+      };
+      const { rects, open } = splitHole(poly, fix);
+      if (open) warn.push(`切り欠き ${i + 1} の継ぎ目 ${open} か所は、抜かない所にぶつかるので重ねていません。`);
+      let blocked = false;
+      for (const use of rects) {
+        if (use.blocked) blocked = true;
         const hit = rectHit(use, { kind: 'notch' });
         if (hit.tool == null) warn.push(`切り欠き ${i + 1} の ${round(use.x1 - use.x0)} × ${round(use.y1 - use.y0)} の部分に入る長方形の金型がありません。`);
         nh.push(hit);
