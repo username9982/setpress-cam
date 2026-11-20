@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>セットプレス CAM</title>
+<meta name="theme-color" content="#2b3a4a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="SP CAM">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="toolbar">
+  <div class="group">
+    <button id="btn-draw" class="mode active" data-mode="draw">描く</button>
+    <button id="btn-select" class="mode" data-mode="select">選ぶ</button>
+  </div>
+  <div class="group">
+    <button id="btn-undo">元に戻す</button>
+    <button id="btn-delete" disabled>削除</button>
+    <button id="btn-fit">全体表示</button>
+  </div>
+  <div class="group">
+    <label>板 <input id="sheet-w" type="number" inputmode="decimal" min="10" max="5000"> ×
+      <input id="sheet-h" type="number" inputmode="decimal" min="10" max="5000"> mm</label>
+    <label>グリッド
+      <select id="snap">
+        <option value="0.1">0.1</option>
+        <option value="1">1</option>
+        <option value="5" selected>5</option>
+        <option value="10">10</option>
+      </select> mm</label>
+  </div>
+  <div class="group right">
+    <button id="btn-new">新規</button>
+    <button id="btn-open">開く</button>
+    <button id="btn-save" class="primary">保存</button>
+  </div>
+</header>
+
+<main id="stage">
+  <canvas id="canvas"></canvas>
+  <div id="props" hidden>
+    <div class="props-title">選んだ四角形</div>
+    <label>X <input id="p-x" type="number" inputmode="decimal" step="any"></label>
+    <label>Y <input id="p-y" type="number" inputmode="decimal" step="any"></label>
+    <label>幅 <input id="p-w" type="number" inputmode="decimal" step="any" min="0.1"></label>
+    <label>高さ <input id="p-h" type="number" inputmode="decimal" step="any" min="0.1"></label>
+    <div class="props-note">単位 mm・左下が原点</div>
+  </div>
+</main>
+
+<footer id="status">
+  <span id="st-name">名前なし</span>
+  <span id="st-count"></span>
+  <span id="st-pos"></span>
+  <span id="st-msg"></span>
+  <span id="st-ver"></span>
+</footer>
+
+<dialog id="dlg-save">
+  <form method="dialog">
+    <h2>保存</h2>
+    <label>名前 <input id="save-name" type="text" required maxlength="60"></label>
+    <div class="dlg-buttons">
+      <button type="button" id="save-cancel">キャンセル</button>
+      <button value="ok" class="primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-open">
+  <form method="dialog">
+    <h2>開く</h2>
+    <ul id="open-list"></ul>
+    <div class="dlg-buttons">
+      <button type="button" id="btn-import">ファイルから読み込む</button>
+      <button type="button" id="btn-export">ファイルに書き出す</button>
+      <button value="cancel">閉じる</button>
+    </div>
+    <input id="import-file" type="file" accept=".json,application/json" hidden>
+  </form>
+</dialog>
+
+<dialog id="dlg-confirm">
+  <form method="dialog">
+    <p id="confirm-text"></p>
+    <div class="dlg-buttons">
+      <button value="cancel">キャンセル</button>
+      <button value="ok" class="primary" id="confirm-ok">OK</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
