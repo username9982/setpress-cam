@@ -203,7 +203,8 @@ input[type=number], input[type=text], select {
   overflow: hidden;
 }
 #st-msg { color: #1a6b2f; font-weight: 600; }
-#st-ver { margin-left: auto; color: #667; }
+#st-sel { margin-left: auto; font-weight: 600; color: #2b3a4a; }  /* 選んだ点の絶対座標・線の長さ（バージョンのすぐ左） */
+#st-ver { color: #667; }
 
 dialog {
   border: none;

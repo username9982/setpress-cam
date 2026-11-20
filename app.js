@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.14.3';
+const APP_VERSION = '0.15.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -816,6 +816,7 @@ canvas.addEventListener('pointermove', (e) => {
     // 画面の Y は上が正なので、表示は下へ正にそろえる
     const [mx, my] = drag.items.length ? drag.last : [dx, dy];
     $('st-pos').textContent = `移動  X ${round(mx)}  Y ${round(-my)}`;
+    updateSelInfo();
   }
 });
 
@@ -1122,9 +1123,27 @@ function updateUi() {
   $('st-prog').textContent = doc.program == null ? 'プログラム番号なし' : programText(doc.program);
   $('st-tools').textContent = doc.tools.map((t, i) => (t.shape === 'none' ? null : `T${i + 1} ${toolText(t)}`))
     .filter(Boolean).join('　') || '金型なし';
+  updateSelInfo();
   updateProps();
   updateLayoutPanel();
   renderCode();
+}
+// バージョンのすぐ左: 点を 1 つ選んだら板の原点（左上）からの絶対座標、線を 1 本選んだら長さ
+function updateSelInfo() {
+  const el = $('st-sel');
+  if (!el) return;
+  let text = '';
+  if (sel.length === 1) {
+    const s = sel[0];
+    if (s.t === 'point' && P(s.id)) {
+      const r = rel(sheetTopLeft(), P(s.id).x, P(s.id).y);
+      text = `${pName(s.id)}  X ${fmt(r.x)}  Y ${fmt(r.y)}`;
+    } else if (s.t === 'line' && L(s.id)) {
+      const l = L(s.id), a = P(l.a), b = P(l.b);
+      text = `${lName(s.id)}  長さ ${fmt(round(Math.abs(b.x - a.x) + Math.abs(b.y - a.y)))}`;
+    }
+  }
+  el.textContent = text;
 }
 
 // ---- 割付 ----
@@ -1138,7 +1157,7 @@ function hitsAt(x, y) {
   const list = [];
   for (const lay of doc.layouts) {
     if (info.owner.get(lay.work) == null) continue;
-    lay.hits.forEach((h, i) => {
+    hitsOf(lay).forEach((h, i) => {
       if (x >= h.x0 - 1e-6 && x <= h.x1 + 1e-6 && y >= h.y0 - 1e-6 && y <= h.y1 + 1e-6) list.push({ work: lay.work, i });
     });
   }
@@ -1166,6 +1185,17 @@ function tapWork(hit, world) {
   updateLayoutPanel();
   renderCode();
   draw();
+}
+// 割付の長方形を、いまのワークの位置に合わせて返す。割付は割り付けたときのワーク原点（org）と一緒に持ち、
+// ワークを動かしたら、原点が動いたぶんだけ一緒に動かす
+function hitsOf(lay) {
+  const k = info.owner.get(lay.work);
+  if (k == null || !info.outers[k]) return lay.hits;
+  const o = info.outers[k].origin;
+  if (!lay.org) lay.org = { x: o.x, y: o.y };  // 古い図面: いまの位置で割り付けたものとみなす
+  const dx = round(o.x - lay.org.x), dy = round(o.y - lay.org.y);
+  if (!dx && !dy) return lay.hits;
+  return lay.hits.map((h) => ({ ...h, x0: round(h.x0 + dx), x1: round(h.x1 + dx), y0: round(h.y0 + dy), y1: round(h.y1 + dy) }));
 }
 function workKey(k) { return info.outers[k].ref.x; }  // 外形を表す点（外形のいちばん左の点）
 function layoutOf(k) { return doc.layouts.find((q) => info.owner.get(q.work) === k) || null; }
@@ -1257,7 +1287,8 @@ function autoLayout() {
   snapshot();
   const key = workKey(k);
   doc.layouts = doc.layouts.filter((q) => info.owner.get(q.work) !== k);
-  doc.layouts.push({ work: key, src: holeSrc(k), hits, warn });
+  const o = info.outers[k].origin;
+  doc.layouts.push({ work: key, src: holeSrc(k), hits, warn, org: { x: o.x, y: o.y } });
   layoutHit = null;
   changed();
   flash(holes.length ? `S${k + 1} の穴 ${holes.length} 個を F3 ${hits.length} 回で割り付けました` : `S${k + 1} には穴がありません`);
@@ -1323,7 +1354,7 @@ function drawLayout() {
   }
   for (const lay of doc.layouts) {
     if (info.owner.get(lay.work) == null) continue;
-    lay.hits.forEach((h, i) => {
+    hitsOf(lay).forEach((h, i) => {
       const [ax, ay] = toScreen(h.x0, h.y1), [bx, by] = toScreen(h.x1, h.y0);
       const col = h.tool == null ? '#b3261e' : LAYOUT_COLOR;
       ctx.save();
@@ -1346,7 +1377,7 @@ function drawLayout() {
   }
   // ハイライト: 選んだ F3 1 回で抜く範囲
   const lay = layoutHit && doc.layouts.find((q) => q.work === layoutHit.work);
-  const h = lay && lay.hits[layoutHit.i];
+  const h = lay && hitsOf(lay)[layoutHit.i];
   if (h && info.owner.get(lay.work) != null) {
     const [ax, ay] = toScreen(h.x0, h.y1), [bx, by] = toScreen(h.x1, h.y0);
     ctx.save();
@@ -1386,7 +1417,7 @@ function genCode() {
     if (lay.src !== holeSrc(k)) add('; ※ 割付のあとで図形が変わりました。もう一度自動割付してください', null, true);
     const xy = (x, y, note) => `  ${('X' + fmt(x)).padEnd(8)}${('Y' + fmt(y)).padEnd(8)}; ${note}`;
     let curTool = null;
-    lay.hits.forEach((h, i) => {
+    hitsOf(lay).forEach((h, i) => {
       const t = h.tool == null ? null : doc.tools[h.tool];
       const hk = hitKey(lay.work, i);  // この F3 のまとまりの行をタップすると、抜く範囲をハイライトする
       add(`; ${i + 1}`, hk, true);
@@ -1572,6 +1603,7 @@ function loadDoc(d) {
         tool: Number.isInteger(h.tool) ? h.tool : null, x0: num(h.x0), y0: num(h.y0), x1: num(h.x1), y1: num(h.y1),
       })).filter((h) => [h.x0, h.y0, h.x1, h.y1].every(Number.isFinite)),
       warn: (Array.isArray(q.warn) ? q.warn : []).map(String),
+      org: q.org && Number.isFinite(Number(q.org.x)) && Number.isFinite(Number(q.org.y)) ? { x: Number(q.org.x), y: Number(q.org.y) } : null,
     })),
     nextId: Math.max(Number(d.nextId) || 1, maxId + 1),
   };
