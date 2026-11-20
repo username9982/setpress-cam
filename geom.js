@@ -77,30 +77,54 @@ const Geo = (() => {
     for (const p of doc.points) if (uf.find(p.id) === root) p[axis] = r3(p[axis] + delta);
   }
 
-  // 寸法を加える。動かす側は、原点とつながっていない側（両方つながっていないときは prefer の側）。
-  // 戻り値: null（できた）か、できない理由
+  // 寸法の値に合わせて、動かす側をまるごと動かす。
+  // 動かす側: 原点とつながっていない側（両方つながっていないときは prefer の側）。
+  // 動かす範囲: 動かす端と、関係（線・寸法）でつながった点に加え、その先に「つながっている線」も
+  // 長さを保ったまま一緒に動かす。ただし、動かさない側や原点のまとまりに届く線は伸び縮みさせる。
+  // uf は、この寸法を入れる前の関係で作ったもの。
+  function applyValue(doc, uf, axis, a, b, value, prefer) {
+    const o = doc.originId;
+    const aFixed = o != null && uf.same(a, o);
+    const bFixed = o != null && uf.same(b, o);
+    const pa = pointById(doc, a)[axis], pb = pointById(doc, b)[axis];
+    const delta = pa + value - pb;  // b を動かす量
+    const moveA = bFixed || (!aFixed && prefer === 'a');
+    const [mover, keep, d] = moveA ? [a, b, -delta] : [b, a, delta];
+    if (Math.abs(d) < EPS) return;
+    const forbid = new Set([uf.find(keep)]);
+    if (o != null) forbid.add(uf.find(o));
+    // まとまり（root）単位で、方向 axis に沿う線をたどる
+    const along = doc.lines.filter((l) => (axis === 'x' ? l.dir === 'h' : l.dir === 'v'));
+    const moving = new Set([uf.find(mover)]);
+    const queue = [uf.find(mover)];
+    while (queue.length) {
+      const r = queue.shift();
+      for (const l of along) {
+        const ra = uf.find(l.a), rb = uf.find(l.b);
+        const next = ra === r ? rb : rb === r ? ra : null;
+        if (next == null || moving.has(next) || forbid.has(next)) continue;
+        moving.add(next);
+        queue.push(next);
+      }
+    }
+    for (const p of doc.points) if (moving.has(uf.find(p.id))) p[axis] = r3(p[axis] + d);
+  }
+
+  // 寸法を加える。戻り値: null（できた）か、できない理由
   function addDim(doc, dim, prefer = 'b') {
     const uf = build(doc, dim.axis);
-    const st = uf.union(dim.a, dim.b, dim.value);
+    const st = build(doc, dim.axis).union(dim.a, dim.b, dim.value);
     if (st !== 'new') {
       return st === 'same' ? 'この距離は、ほかの寸法や線からすでに決まっています。'
         : 'この距離は、ほかの寸法や線と合いません。';
     }
-    // union する前の状態で、動かす側を決めて動かす
-    const before = build(doc, dim.axis);
-    const pa = pointById(doc, dim.a)[dim.axis], pb = pointById(doc, dim.b)[dim.axis];
-    const delta = pa + dim.value - pb;  // b を動かす量
-    const o = doc.originId;
-    const aFixed = o != null && before.same(dim.a, o);
-    const bFixed = o != null && before.same(dim.b, o);
-    if (bFixed || (!aFixed && prefer === 'a')) shiftGroup(doc, before, dim.axis, dim.a, -delta);
-    else shiftGroup(doc, before, dim.axis, dim.b, delta);
+    applyValue(doc, uf, dim.axis, dim.a, dim.b, dim.value, prefer);
     doc.dims.push(dim);
     return null;
   }
 
   // 寸法の値を変える
-  function setDimValue(doc, dimId, value) {
+  function setDimValue(doc, dimId, value, prefer = 'b') {
     const d = doc.dims.find((q) => q.id === dimId);
     if (!d) return '寸法が見つかりません。';
     const uf = build(doc, d.axis, d.id);
@@ -109,11 +133,7 @@ const Geo = (() => {
       if (Math.abs(now - value) < EPS) { d.value = value; return null; }
       return 'この寸法は、ほかの寸法や線からも決まっているので変えられません。';
     }
-    const pa = pointById(doc, d.a)[d.axis], pb = pointById(doc, d.b)[d.axis];
-    const delta = pa + value - pb;
-    const o = doc.originId;
-    if (o != null && uf.same(d.b, o)) shiftGroup(doc, uf, d.axis, d.a, -delta);
-    else shiftGroup(doc, uf, d.axis, d.b, delta);
+    applyValue(doc, uf, d.axis, d.a, d.b, value, prefer);
     d.value = value;
     return null;
   }

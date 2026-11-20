@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示はワーク原点からの値にする。
 
-const APP_VERSION = '0.5.0';
+const APP_VERSION = '0.5.1';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -695,7 +695,11 @@ function dimOptions() {
       const names = d.refs.map(refName).join(' と ');
       return {
         title: `寸法 D${d.id}`,
-        rows: [{ label: `${names} の ${axisName(d.axis)}`, axis: d.axis, a: d.a, b: d.b, kind: d.kind, refs: d.refs, signed: d.kind === 'o' }],
+        rows: [{
+          label: `${names} の ${axisName(d.axis)}`, axis: d.axis, a: d.a, b: d.b, kind: d.kind, refs: d.refs, signed: d.kind === 'o',
+          // 線の長さは左・下の端を残す
+          prefer: d.kind === 'len' && P(d.a)[d.axis] > P(d.b)[d.axis] ? 'a' : 'b',
+        }],
         isDim: true,
       };
     }
@@ -800,7 +804,10 @@ function commitDim(i, input) {
   const sign = r.signed ? 1 : (existing ? Math.sign(existing.value) || 1 : Math.sign(cur) || 1);
   const value = round(sign * v);
   snapshot();
-  const err = existing ? Geo.setDimValue(doc, existing.id, value)
+  // 寸法の a・b が欄の a・b と逆向きなら、動かす側も入れ替える
+  const flip = existing && existing.a !== r.a;
+  const prefer = flip ? (r.prefer === 'a' ? 'b' : 'a') : r.prefer;
+  const err = existing ? Geo.setDimValue(doc, existing.id, value, prefer)
     : Geo.addDim(doc, { id: newId(), axis: r.axis, a: r.a, b: r.b, value, kind: r.kind, refs: r.refs.map((q) => ({ ...q })) }, r.prefer);
   if (err) {
     doc = JSON.parse(undoStack.pop());
