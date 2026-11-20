@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.15.1';
+const APP_VERSION = '0.16.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1158,6 +1158,16 @@ function hitsAt(x, y) {
   for (const lay of doc.layouts) {
     if (info.owner.get(lay.work) == null) continue;
     hitsOf(lay).forEach((h, i) => {
+      if (macroOf(h) === 'F13') {
+        // F13 は輪郭のまわりの帯（金型が通る所）だけ。金型がないときも指で押せる幅にする
+        const t = h.tool == null ? null : doc.tools[h.tool];
+        const m = 10 / view.scale;
+        const dw = Math.max(t ? t.w : 0, m), dh = Math.max(t ? t.h : 0, m);
+        const out = x >= h.x0 - m && x <= h.x1 + m && y >= h.y0 - m && y <= h.y1 + m;
+        const inner = x > h.x0 + dw && x < h.x1 - dw && y > h.y0 + dh && y < h.y1 - dh;
+        if (out && !inner) list.push({ work: lay.work, i });
+        return;
+      }
       if (x >= h.x0 - 1e-6 && x <= h.x1 + 1e-6 && y >= h.y0 - 1e-6 && y <= h.y1 + 1e-6) list.push({ work: lay.work, i });
     });
   }
@@ -1203,8 +1213,29 @@ function layoutOf(k) { return doc.layouts.find((q) => info.owner.get(q.work) ===
 function holesOf(k) { return shapes.filter((s) => s.role === 'hole' && s.outer === k); }
 function holeSrc(k) {
   const o = info.outers[k].origin;
-  return JSON.stringify(holesOf(k).map((s) => s.poly.map((v) => [round(v.x - o.x), round(o.y - v.y)])));
+  const rel2 = (poly) => poly.map((v) => [round(v.x - o.x), round(o.y - v.y)]);
+  const src = JSON.stringify(holesOf(k).map((s) => rel2(s.poly)));
+  // 外形を F13 で抜くときは、外形の形も比べる
+  return outerRect(k) ? `${src}|${JSON.stringify(rel2(shapes[info.outers[k].shape].poly))}` : src;
 }
+// 外形が単純な長方形（切り欠きもない）なら、その範囲 {x0, y0, x1, y1}。そうでなければ null
+function outerRect(k) {
+  const poly = shapes[info.outers[k].shape].poly;
+  if (poly.length !== 4) return null;
+  if (shapes.some((s) => s.role === 'notch' && s.outer === k)) return null;
+  const xs = poly.map((v) => v.x), ys = poly.map((v) => v.y);
+  return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
+}
+// 外形の輪郭を抜く金型: 長方形の金型のうち、いちばん大きいもの
+function pickOutlineTool() {
+  let best = null;
+  doc.tools.forEach((t, i) => {
+    if (t.shape !== 'rect' || !t.w || !t.h) return;
+    if (best == null || t.w * t.h > doc.tools[best].w * doc.tools[best].h) best = i;
+  });
+  return best;
+}
+const macroOf = (h) => h.macro || 'F3';
 // 長方形の金型（番号）のうち、w × h の長方形に入るいちばん大きいもの
 function pickRectTool(w, h) {
   let best = null;
@@ -1284,6 +1315,18 @@ function autoLayout() {
   });
   // 上から下、左から右の順に抜く
   hits.sort((p, q) => q.y1 - p.y1 || p.x0 - q.x0);
+  // 外形が単純な長方形なら、最後に F13 で輪郭を抜く。F13 は入れた長方形の内側に沿って金型を送るので、
+  // 金型寸法のぶん外側にオフセットした長方形を入れる（開始点 左上 → 外形 XY → 金型 XY → 角 R）
+  const box = outerRect(k);
+  if (box) {
+    const tool = pickOutlineTool();
+    const t = tool == null ? null : doc.tools[tool];
+    const dw = t ? t.w : 0, dh = t ? t.h : 0;
+    if (tool == null) warn.push('外形を抜く長方形の金型がありません。');
+    hits.push({ macro: 'F13', tool, r: 0, x0: round(box.x0 - dw), y0: round(box.y0 - dh), x1: round(box.x1 + dw), y1: round(box.y1 + dh) });
+  } else {
+    warn.push('外形が単純な長方形ではないので、外形はまだ割り付けません。');
+  }
   snapshot();
   const key = workKey(k);
   doc.layouts = doc.layouts.filter((q) => info.owner.get(q.work) !== k);
@@ -1291,7 +1334,8 @@ function autoLayout() {
   doc.layouts.push({ work: key, src: holeSrc(k), hits, warn, org: { x: o.x, y: o.y } });
   layoutHit = null;
   changed();
-  flash(holes.length ? `S${k + 1} の穴 ${holes.length} 個を F3 ${hits.length} 回で割り付けました` : `S${k + 1} には穴がありません`);
+  const n3 = hits.filter((h) => macroOf(h) === 'F3').length;
+  flash(`S${k + 1} を割り付けました（穴 ${holes.length} 個 F3 ${n3} 回${box ? '、外形 F13' : ''}）`);
 }
 function clearLayout() {
   const k = layoutWork;
@@ -1319,7 +1363,8 @@ function updateLayoutPanel() {
     const holes = holesOf(k);
     summary = `穴 ${holes.length} 個`;
     if (lay) {
-      summary += `\nF3 ${lay.hits.length} 回`;
+      const n13 = lay.hits.filter((h) => macroOf(h) === 'F13').length;
+      summary += `\nF3 ${lay.hits.length - n13} 回` + (n13 ? `\nF13 ${n13} 回（外形）` : '');
       const used = [...new Set(lay.hits.map((h) => h.tool).filter((t) => t != null))];
       if (used.length) summary += `\n金型 ${used.map((t) => `T${t + 1} ${toolText(doc.tools[t])}`).join('、')}`;
       warn.push(...lay.warn);
@@ -1371,7 +1416,7 @@ function drawLayout() {
       ctx.fillStyle = col;
       ctx.font = 'bold 12px sans-serif';
       ctx.textBaseline = 'top';
-      ctx.fillText(`${i + 1}`, ax + 3, ay + 2);
+      ctx.fillText(macroOf(h) === 'F13' ? `${i + 1} F13` : `${i + 1}`, ax + 3, ay + 2);
       ctx.restore();
     });
   }
@@ -1382,14 +1427,26 @@ function drawLayout() {
     const [ax, ay] = toScreen(h.x0, h.y1), [bx, by] = toScreen(h.x1, h.y0);
     ctx.save();
     ctx.fillStyle = 'rgba(232, 137, 12, 0.35)';
-    ctx.fillRect(ax, ay, bx - ax, by - ay);
     ctx.strokeStyle = COLOR.selected;
     ctx.lineWidth = 3;
-    ctx.strokeRect(ax, ay, bx - ax, by - ay);
+    const t = h.tool == null ? null : doc.tools[h.tool];
+    if (macroOf(h) === 'F13' && t) {
+      // F13: 金型が通る輪郭の帯だけを塗る
+      const [cx, cy] = toScreen(h.x0 + t.w, h.y1 - t.h), [dx, dy] = toScreen(h.x1 - t.w, h.y0 + t.h);
+      ctx.beginPath();
+      ctx.rect(ax, ay, bx - ax, by - ay);
+      ctx.rect(cx, cy, dx - cx, dy - cy);
+      ctx.fill('evenodd');
+      ctx.strokeRect(ax, ay, bx - ax, by - ay);
+      ctx.strokeRect(cx, cy, dx - cx, dy - cy);
+    } else {
+      ctx.fillRect(ax, ay, bx - ax, by - ay);
+      ctx.strokeRect(ax, ay, bx - ax, by - ay);
+    }
     ctx.fillStyle = COLOR.selected;
     ctx.font = 'bold 13px sans-serif';
     ctx.textBaseline = 'bottom';
-    ctx.fillText(`F3 ${layoutHit.i + 1}`, ax, ay - 3);
+    ctx.fillText(`${macroOf(h)} ${layoutHit.i + 1}`, ax, ay - 3);
     ctx.restore();
   }
 }
@@ -1413,19 +1470,21 @@ function genCode() {
     if (k == null) continue;
     const o = info.outers[k].origin;
     add('', null);
-    add(`; S${k + 1} 割付（穴）  F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法`, null, true);
+    add(`; S${k + 1} 割付  穴 F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法`, null, true);
     if (lay.src !== holeSrc(k)) add('; ※ 割付のあとで図形が変わりました。もう一度自動割付してください', null, true);
     const xy = (x, y, note) => `  ${('X' + fmt(x)).padEnd(8)}${('Y' + fmt(y)).padEnd(8)}; ${note}`;
     let curTool = null;
     hitsOf(lay).forEach((h, i) => {
       const t = h.tool == null ? null : doc.tools[h.tool];
       const hk = hitKey(lay.work, i);  // この F3 のまとまりの行をタップすると、抜く範囲をハイライトする
-      add(`; ${i + 1}`, hk, true);
+      const f13 = macroOf(h) === 'F13';
+      add(f13 ? `; ${i + 1} 外形  F13: 開始点（左上）→ 外形 XY → 金型 XY → 角 R（金型寸法のぶん外側）` : `; ${i + 1}`, hk, true);
       if (h.tool != null && h.tool !== curTool) { add(`T${h.tool + 1}`, hk); curTool = h.tool; }
-      add('F3', hk);
+      add(macroOf(h), hk);
       add(xy(h.x0 - o.x, o.y - h.y1, '開始点'), hk);
-      add(xy(h.x1 - h.x0, h.y1 - h.y0, '寸法'), hk);
+      add(xy(h.x1 - h.x0, h.y1 - h.y0, f13 ? '外形' : '寸法'), hk);
       add(t ? xy(t.w, t.h, '金型') : '  ?       ?       ; 金型（入る長方形の金型がない）', hk);
+      if (f13) add(`  ${('R' + fmt(h.r || 0)).padEnd(16)}; 角 R`, hk);
     });
     if (!lay.hits.length) add('; 穴がありません', null, true);
   }
@@ -1601,6 +1660,7 @@ function loadDoc(d) {
       work: Number(q.work), src: String(q.src || ''),
       hits: (Array.isArray(q.hits) ? q.hits : []).map((h) => ({
         tool: Number.isInteger(h.tool) ? h.tool : null, x0: num(h.x0), y0: num(h.y0), x1: num(h.x1), y1: num(h.y1),
+        ...(h.macro === 'F13' ? { macro: 'F13', r: Number.isFinite(num(h.r)) ? num(h.r) : 0 } : {}),
       })).filter((h) => [h.x0, h.y0, h.x1, h.y1].every(Number.isFinite)),
       warn: (Array.isArray(q.warn) ? q.warn : []).map(String),
       org: q.org && Number.isFinite(Number(q.org.x)) && Number.isFinite(Number(q.org.y)) ? { x: Number(q.org.x), y: Number(q.org.y) } : null,
