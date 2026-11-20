@@ -513,13 +513,63 @@ const Geo = (() => {
     for (let i = 0; i < pts.length; i++) { const a = pts[i], b = pts[(i + 1) % pts.length]; area += a.x * b.y - b.x * a.y; }
     return Math.abs(area) > EPS ? pts : null;
   }
+  // 長方形 box から、水平・垂直の辺だけの多角形 poly を除いた所を、つながった所ごとの多角形で返す
+  // （L 字の外形を囲む四角の、欠けた角など）。頂点の X・Y で格子に切り、外形の外のマスをつなげて輪郭をたどる
+  function complementPieces(poly, box) {
+    const xs = [...new Set([box.x0, box.x1, ...poly.map((v) => r3(v.x))])].filter((x) => x >= box.x0 - EPS && x <= box.x1 + EPS).sort((p, q) => p - q);
+    const ys = [...new Set([box.y0, box.y1, ...poly.map((v) => r3(v.y))])].filter((y) => y >= box.y0 - EPS && y <= box.y1 + EPS).sort((p, q) => p - q);
+    const nx = xs.length - 1, ny = ys.length - 1;
+    const out = (i, j) => i >= 0 && j >= 0 && i < nx && j < ny && inside(poly, (xs[i] + xs[i + 1]) / 2, (ys[j] + ys[j + 1]) / 2) < 0;
+    const comp = new Map();
+    let n = 0;
+    for (let i = 0; i < nx; i++) {
+      for (let j = 0; j < ny; j++) {
+        if (!out(i, j) || comp.has(`${i},${j}`)) continue;
+        const stack = [[i, j]];
+        comp.set(`${i},${j}`, n);
+        while (stack.length) {
+          const [a, b] = stack.pop();
+          for (const [c, d] of [[a + 1, b], [a - 1, b], [a, b + 1], [a, b - 1]]) {
+            if (out(c, d) && !comp.has(`${c},${d}`)) { comp.set(`${c},${d}`, n); stack.push([c, d]); }
+          }
+        }
+        n++;
+      }
+    }
+    const pieces = [];
+    for (let c = 0; c < n; c++) {
+      const inC = (i, j) => comp.get(`${i},${j}`) === c;
+      // マスの辺のうち、隣が同じまとまりでないものを左回りに集めてつなぐ
+      const next = new Map();
+      const P = (i, j) => `${i},${j}`;
+      for (const [key, cc] of comp) {
+        if (cc !== c) continue;
+        const [i, j] = key.split(',').map(Number);
+        if (!inC(i, j - 1)) next.set(P(i, j), P(i + 1, j));
+        if (!inC(i + 1, j)) next.set(P(i + 1, j), P(i + 1, j + 1));
+        if (!inC(i, j + 1)) next.set(P(i + 1, j + 1), P(i, j + 1));
+        if (!inC(i - 1, j)) next.set(P(i, j + 1), P(i, j));
+      }
+      const start = next.keys().next().value;
+      const loop = [];
+      let cur = start, guard = 0;
+      do {
+        const [i, j] = cur.split(',').map(Number);
+        loop.push({ x: xs[i], y: ys[j] });
+        cur = next.get(cur);
+      } while (cur && cur !== start && ++guard < 10000);
+      const cleaned = clipToRect(loop, box);  // 一直線に並んだ点を除く
+      if (cleaned) pieces.push(cleaned);
+    }
+    return pieces;
+  }
   // 多角形を、重ならずに接する長方形に分ける。水平の帯と垂直の帯の 2 通りを返す
   function rectPartitions(poly) {
     return [slabs(poly, 'y'), slabs(poly, 'x')];
   }
 
   return {
-    EPS, AXES, r3, rectGrow, rectPartitions, rectInside, clipToRect, pointById, lineById, analyze, build, addDim, setDimValue, moveItems,
+    EPS, AXES, r3, rectGrow, rectPartitions, rectInside, clipToRect, complementPieces, pointById, lineById, analyze, build, addDim, setDimValue, moveItems,
     strokeToPolyline, cleanPolyline, deleteLines, closedShapes, classifyShapes, inside, overlaps,
   };
 })();

@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.17.0';
+const APP_VERSION = '0.17.1';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -35,6 +35,7 @@ function newDoc() {
     program: null,  // プログラム番号
     tools: Array.from({ length: TOOL_COUNT }, emptyTool),
     sheet: { w: 1000, h: 500, t: null },  // t: 板厚（mm、未設定は null）
+    mj: lastMj(),  // ミクロジョイント（mm、0 はつなげない）
     layouts: [],  // 割付 [{work: 外形の点, src: 割付したときの穴の形, hits: [{tool, x0, y0, x1, y1}], warn: []}]
     points: [],
     lines: [],
@@ -1220,10 +1221,9 @@ function holeSrc(k) {
   // 外形を F13 で抜くときは、外形の形も比べる
   return outerRect(k) ? `${src}|${JSON.stringify(rel2(shapes[info.outers[k].shape].poly))}` : src;
 }
-// 外形が単純な長方形（切り欠きもない）なら、その範囲 {x0, y0, x1, y1}。そうでなければ null
+// 外形を囲む四角。F13 はこの四角を抜き、L 字などで四角から欠けた所は切り欠きとして先に抜く
 function outerRect(k) {
   const poly = shapes[info.outers[k].shape].poly;
-  if (poly.length !== 4) return null;
   const xs = poly.map((v) => v.x), ys = poly.map((v) => v.y);
   return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
 }
@@ -1326,21 +1326,21 @@ function autoLayout() {
   // 切り欠き: 外形と重なる所を、単発（金型とちょうど同じ大きさ）か F3 で抜く。ほかのワークにぶつからなければ、
   // 外形の辺の外へ広げて四角く抜き、あとから抜く F13 に金型寸法の約 1/3 かぶるようにする
   // （抜いた輪郭とこれから抜く輪郭がぴったり接すると金型に良くないため）。
+  // L 字のような外形は、囲む四角から欠けた所も切り欠きとして抜く
   const box = outerRect(k);
-  const notches = notchesOf(k);
-  const outlineTool = box ? pickOutlineTool() : null;
-  if (notches.length && !box) warn.push('外形が単純な長方形ではないので、切り欠きはまだ割り付けません。');
-  if (notches.length && box) {
+  const gaps = Geo.complementPieces(shapes[info.outers[k].shape].poly, box);
+  const notches = [...notchesOf(k).map((s) => Geo.clipToRect(s.poly, box)), ...gaps];
+  const outlineTool = pickOutlineTool();
+  if (notches.length) {
     const ot = outlineTool == null ? null : doc.tools[outlineTool];
     const step1 = (v) => Math.max(0.1, Math.round(v * 10) / 10);
     const ovx = ot ? step1(ot.w / 3) : 0, ovy = ot ? step1(ot.h / 3) : 0;
     const others = info.outers.filter((o, j) => j !== k).map((o) => shapes[o.shape].poly);
     const E = 1e-6;
     const nh = [];
-    notches.forEach((s, i) => {
-      // 外形の中の部分（実際に抜く所）を長方形に分け、外形の辺に乗っている側を外へ約 1/3 広げる。
+    notches.forEach((poly, i) => {
+      // 外形を囲む四角の中の部分（実際に抜く所）を長方形に分け、四角の辺に乗っている側を外へ約 1/3 広げる。
       // 描いた切り欠きがどこまで外へ出ていても、広げる量は同じ
-      const poly = Geo.clipToRect(s.poly, box);
       if (!poly) return;
       const { rects, open } = splitHole(poly);
       if (open) warn.push(`切り欠き ${i + 1} の継ぎ目 ${open} か所は、抜かない所にぶつかるので重ねていません。`);
@@ -1371,9 +1371,7 @@ function autoLayout() {
     const t = tool == null ? null : doc.tools[tool];
     const dw = t ? t.w : 0, dh = t ? t.h : 0;
     if (tool == null) warn.push('外形を抜く長方形の金型がありません。');
-    hits.push({ macro: 'F13', tool, mj: 0, x0: round(box.x0 - dw), y0: round(box.y0 - dh), x1: round(box.x1 + dw), y1: round(box.y1 + dh) });
-  } else {
-    warn.push('外形が単純な長方形ではないので、外形はまだ割り付けません。');
+    hits.push({ macro: 'F13', tool, mj: doc.mj || 0, x0: round(box.x0 - dw), y0: round(box.y0 - dh), x1: round(box.x1 + dw), y1: round(box.y1 + dh) });
   }
   snapshot();
   const key = workKey(k);
@@ -1382,7 +1380,7 @@ function autoLayout() {
   doc.layouts.push({ work: key, src: holeSrc(k), hits, warn, org: { x: o.x, y: o.y } });
   layoutHit = null;
   changed();
-  flash(`S${k + 1} を割り付けました（穴 ${holes.length} 個${notches.length ? `・切り欠き ${notches.length} 個` : ''}${box ? '・外形 F13' : ''}）`);
+  flash(`S${k + 1} を割り付けました（穴 ${holes.length} 個${notches.length ? `・切り欠き ${notches.length} 個` : ''}・外形 F13）`);
 }
 function clearLayout() {
   const k = layoutWork;
@@ -1398,14 +1396,21 @@ $('btn-clearlayout').addEventListener('click', clearLayout);
 // F13 は角 R のぶん各辺の両端を開けて抜くので、角 R = 金型寸法 + ミクロジョイント を入れる
 // （例: 15 mm 角の金型でミクロジョイント 0.2 なら角 R 15.2。角が 0.2 mm ずつつながる）。
 const selF13 = () => { const lay = layoutWork == null ? null : layoutOf(layoutWork); return lay && lay.hits.find((q) => macroOf(q) === 'F13'); };
+// 値は図面（doc.mj）に保存し、「自動割付」をやり直しても、ほかのワークでも同じ値を使う。新しい図面には最後に使った値
+const MJ_KEY = 'setpress-cam:mj';
+function lastMj() { try { const v = Number(localStorage.getItem('setpress-cam:mj')); return Number.isFinite(v) && v > 0 ? v : 0; } catch (e) { return 0; } }
 numberInput('lp-mj', () => 0, () => {
   const h = selF13();
   const t = h && h.tool != null ? doc.tools[h.tool] : null;
-  return h && t ? Math.max(0, Math.min(h.x1 - h.x0, h.y1 - h.y0) / 2 - Math.max(t.w, t.h)) : 0;
+  return h && t ? Math.max(0, Math.min(h.x1 - h.x0, h.y1 - h.y0) / 2 - Math.max(t.w, t.h)) : 50;
 }, (v) => {
   const h = selF13();
-  if (!h || v === (h.mj || 0)) { updateUi(); return; }
-  snapshot(); h.mj = v; changed();
+  if (v === (doc.mj || 0) && (!h || v === (h.mj || 0))) { updateUi(); return; }
+  snapshot();
+  doc.mj = v;
+  if (h) h.mj = v;
+  try { localStorage.setItem(MJ_KEY, String(v)); } catch (e) { /* 保存できなくても図面には残る */ }
+  changed();
 });
 function f13R(h) {
   const t = h.tool == null ? null : doc.tools[h.tool];
@@ -1474,7 +1479,7 @@ function updateLayoutPanel() {
   let summary = '';
   if (k != null) {
     const holes = holesOf(k);
-    const nn = notchesOf(k).length;
+    const nn = notchesOf(k).length + Geo.complementPieces(shapes[info.outers[k].shape].poly, outerRect(k)).length;
     summary = `穴 ${holes.length} 個` + (nn ? `・切り欠き ${nn} 個` : '');
     if (lay) {
       const count = (m) => lay.hits.filter((h) => macroOf(h) === m).length;
@@ -1489,8 +1494,8 @@ function updateLayoutPanel() {
   }
   $('lp-summary').textContent = summary;
   const f13 = lay && lay.hits.find((h) => macroOf(h) === 'F13');
-  $('lp-mj-row').hidden = !f13;
-  if (f13 && document.activeElement !== $('lp-mj')) $('lp-mj').value = f13.mj || 0;
+  $('lp-mj-row').hidden = k == null;  // ワークを選んだら、割り付ける前でも入れられる
+  if (k != null && document.activeElement !== $('lp-mj')) $('lp-mj').value = f13 ? f13.mj || 0 : doc.mj || 0;
   const ul = $('lp-warn');
   ul.textContent = '';
   for (const w of warn) { const li = document.createElement('li'); li.textContent = w; ul.append(li); }
@@ -1787,6 +1792,7 @@ function loadDoc(d) {
     program: Number.isInteger(prog) && prog >= PROGRAM_MIN && prog <= PROGRAM_MAX ? prog : null,
     tools: normalizeTools(d.tools),
     sheet: { w: Number(d.sheet.w) || 1000, h: Number(d.sheet.h) || 500, t: posNum(d.sheet.t) },
+    mj: posNum(d.mj) || 0,
     points, lines, dims,
     layouts: (Array.isArray(d.layouts) ? d.layouts : []).filter((q) => q && ids.has(Number(q.work))).map((q) => ({
       work: Number(q.work), src: String(q.src || ''),
