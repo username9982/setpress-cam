@@ -3,7 +3,7 @@
 // セットプレス CAM — 動作確認版: 四角形を描いて保存する。
 // 座標はすべて mm。原点は板の左下、Y は上向き（機械の座標に合わせる）。
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.1.1';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -43,7 +43,8 @@ function saveCurrent() {
 function round(v) { return Math.round(v * 1000) / 1000; }
 
 // ---- 表示の変換（mm ⇔ 画面） ----
-const view = { scale: 1, ox: 0, oy: 0 }; // 画面 = (ox + x*scale, oy - y*scale)
+// fitted: 「全体表示」のままか（指やホイールで動かしたら false）
+const view = { scale: 1, ox: 0, oy: 0, fitted: true }; // 画面 = (ox + x*scale, oy - y*scale)
 let cssW = 0, cssH = 0;
 
 function toScreen(x, y) { return [view.ox + x * view.scale, view.oy - y * view.scale]; }
@@ -55,18 +56,30 @@ function fitView() {
   view.scale = Math.max(s, 0.01);
   view.ox = (cssW - doc.sheet.w * view.scale) / 2;
   view.oy = (cssH + doc.sheet.h * view.scale) / 2;
+  view.fitted = true;
   draw();
 }
 
+// 画面の大きさが変わったとき（iPad の回転、ツールバーの折り返し）。
+// 全体表示のままなら合わせ直し、拡大して見ていたなら、画面の中心に見えていた所を中心に保つ。
 function resize() {
   const rect = canvas.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return;
+  if (rect.width === cssW && rect.height === cssH) return;
   const firstTime = cssW === 0;
+  const oldW = cssW, oldH = cssH;
   cssW = rect.width; cssH = rect.height;
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.round(cssW * dpr);
   canvas.height = Math.round(cssH * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  if (firstTime) fitView(); else draw();
+  if (firstTime || view.fitted) {
+    fitView();
+  } else {
+    view.ox += (cssW - oldW) / 2;
+    view.oy += (cssH - oldH) / 2;
+    draw();
+  }
 }
 
 // ---- 描画 ----
@@ -233,6 +246,7 @@ canvas.addEventListener('pointermove', (e) => {
     view.ox = mid[0] - (drag.mid[0] - view.ox) * k;
     view.oy = mid[1] - (drag.mid[1] - view.oy) * k;
     view.scale *= k;
+    view.fitted = false;
     drag.dist = dist; drag.mid = mid;
     draw();
   } else if (drag.kind === 'draw') {
@@ -288,6 +302,7 @@ canvas.addEventListener('wheel', (e) => {
   view.ox = sx - (sx - view.ox) * k;
   view.oy = sy - (sy - view.oy) * k;
   view.scale *= k;
+  view.fitted = false;
   draw();
 }, { passive: false });
 
@@ -526,7 +541,9 @@ $('import-file').addEventListener('change', async () => {
 });
 
 // ---- 起動 ----
-window.addEventListener('resize', resize);
+// 回転のあと iOS が大きさを遅れて知らせることがあるので、キャンバス自体の大きさを見張る
+if ('ResizeObserver' in window) new ResizeObserver(resize).observe(canvas);
+else window.addEventListener('resize', resize);
 window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
 
 (function start() {
