@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.17.3';
+const APP_VERSION = '0.17.4';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -102,7 +102,9 @@ function applyPlacements() {
   for (const d of sd) {
     const k = a.owner.get(d.b);
     if (k == null) continue;
-    const o = a.outers[k].origin;
+    const lay = doc.layouts.find((q) => a.owner.get(q.work) === k);
+    const off = layOffset(lay);
+    const o = { x: a.outers[k].origin.x + off.x, y: a.outers[k].origin.y + off.y };
     const sh = shift.get(k) || { x: 0, y: 0 };
     if (d.axis === 'x') sh.x = d.value - o.x; else sh.y = (doc.sheet.h - d.value) - o.y;
     shift.set(k, sh);
@@ -112,9 +114,22 @@ function applyPlacements() {
     if (sh) { p.x = round(p.x + sh.x); p.y = round(p.y + sh.y); }
   }
 }
+// ワーク原点: 割付の前は外形を囲む四角の左上。割付のあとは、抜く範囲（F13 の外側など）を囲む四角の左上。
+// プログラムの座標・原点の印・板の原点からの寸法は、このワーク原点を使う
+// （info.outers[k].origin は形の位置を表すもので、割付を一緒に動かすのに使う）
+function layOffset(lay) {
+  if (!lay || !lay.org || !lay.hits.length) return { x: 0, y: 0 };
+  const x0 = Math.min(...lay.hits.map((h) => h.x0)), y1 = Math.max(...lay.hits.map((h) => h.y1));
+  return { x: round(Math.min(0, x0 - lay.org.x)), y: round(Math.max(0, y1 - lay.org.y)) };
+}
+function workOrigin(k) {
+  const o = info.outers[k].origin;
+  const off = layOffset(layoutOf(k));
+  return { x: round(o.x + off.x), y: round(o.y + off.y) };
+}
 // 外形の原点の、板の原点からの位置（右へ X+、下へ Y+）
 function sheetPos(k, axis) {
-  const o = info.outers[k].origin;
+  const o = workOrigin(k);
   return round(axis === 'x' ? o.x : doc.sheet.h - o.y);
 }
 function sheetDimOf(k, axis) { return doc.dims.find((d) => d.kind === 'sheet' && d.axis === axis && info.owner.get(d.b) === k); }
@@ -152,7 +167,7 @@ const D = (id) => doc.dims.find((d) => d.id === id);
 // ワーク原点は外形ごとに、外形を囲む四角の左上。座標は原点から右へ X+、下へ Y+ で表す。
 // どの外形にも属さないものは、板の左上から測る。
 const sheetTopLeft = () => ({ x: 0, y: doc.sheet.h });
-function originAt(x, y) { const k = info.outerAt(x, y); return k == null ? sheetTopLeft() : info.outers[k].origin; }
+function originAt(x, y) { const k = info.outerAt(x, y); return k == null ? sheetTopLeft() : workOrigin(k); }
 function rel(o, x, y) { return { x: round(x - o.x), y: round(o.y - y) }; }
 function elemExists(s) {
   if (s.t === 'origin') return s.id < info.outers.length;
@@ -273,7 +288,7 @@ function draw() {
   layoutDims().forEach((lv, i) => { if (doc.dims[i].kind === 'sheet') drawSheetDim(doc.dims[i]); else drawDim(doc.dims[i], lv); });
   for (const l of doc.lines) drawLine(l);
   for (const p of doc.points) drawPoint(p);
-  info.outers.forEach((fr, k) => drawOrigin(fr.origin, k));
+  info.outers.forEach((fr, k) => drawOrigin(workOrigin(k), k));
   if (drag && drag.kind === 'stroke') drawStroke();
 }
 
@@ -370,7 +385,7 @@ function sheetGap(d) {
 function drawSheetDim(d) {
   const k = info.owner.get(d.b);
   if (k == null) return;
-  const o = info.outers[k].origin;
+  const o = workOrigin(k);
   const s = isSel('dim', d.id);
   const gap = sheetGap(d);
   const h = doc.sheet.h;
@@ -766,7 +781,7 @@ canvas.addEventListener('pointermove', (e) => {
       const families = sel.filter((q) => q.t === 'origin').map((q) => ({
         pids: new Set(doc.points.filter((p) => info.owner.get(p.id) === q.id).map((p) => p.id)),
         sheet: ['x', 'y'].map((axis) => sheetDimOf(q.id, axis)).filter(Boolean),
-        origin: { ...info.outers[q.id].origin },
+        origin: workOrigin(q.id),
       }));
       const inFamily = (pid) => families.some((f) => f.pids.has(pid));
       const items = sel.filter((q) => (q.t === 'line' ? !(inFamily(L(q.id).a) && inFamily(L(q.id).b))
@@ -1408,9 +1423,11 @@ function autoLayout() {
   }
   snapshot();
   const key = workKey(k);
+  const before = workOrigin(k);  // 前の割付があれば、その原点
   doc.layouts = doc.layouts.filter((q) => info.owner.get(q.work) !== k);
   const o = info.outers[k].origin;
   doc.layouts.push({ work: key, src: holeSrc(k), hits, warn, org: { x: o.x, y: o.y } });
+  keepSheetDims(k, before);
   layoutHit = null;
   changed();
   flash(`S${k + 1} を割り付けました（穴 ${holes.length} 個${notches.length ? `・切り欠き ${notches.length} 個` : ''}・外形 F13）`);
@@ -1419,9 +1436,19 @@ function clearLayout() {
   const k = layoutWork;
   if (k == null || !layoutOf(k)) return;
   snapshot();
+  const before = workOrigin(k);
   doc.layouts = doc.layouts.filter((q) => info.owner.get(q.work) !== k);
+  keepSheetDims(k, before);
   layoutHit = null;
   changed();
+}
+// ワーク原点が before から動いたぶん、板の原点からの寸法の値を直す（ワークの位置は変えない）
+function keepSheetDims(k, before) {
+  const now = workOrigin(k);
+  for (const axis of ['x', 'y']) {
+    const d = sheetDimOf(k, axis);
+    if (d) d.value = round(d.value + (axis === 'x' ? now.x - before.x : before.y - now.y));
+  }
 }
 $('btn-autolayout').addEventListener('click', autoLayout);
 $('btn-clearlayout').addEventListener('click', clearLayout);
@@ -1630,7 +1657,7 @@ function genCode() {
   for (const lay of doc.layouts) {
     const k = info.owner.get(lay.work);
     if (k == null) continue;
-    const o = info.outers[k].origin;
+    const o = workOrigin(k);  // 抜く範囲の左上
     add('', null);
     add(`; S${k + 1} 割付  F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法`, null, true);
     if (lay.src !== holeSrc(k)) add('; ※ 割付のあとで図形が変わりました。もう一度自動割付してください', null, true);
