@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.14.0';
+const APP_VERSION = '0.14.1';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1156,6 +1156,57 @@ function pickRectTool(w, h) {
   });
   return best;
 }
+// 穴を長方形に分け、継ぎ目で金型寸法の約 1/3 重ねる。
+// 抜いた輪郭とこれから抜く輪郭がぴったり接すると金型に良くないため。重ねた先が穴からはみ出す（抜かない所に
+// ぶつかる）ときは、反対側の長方形を伸ばす。どちらもはみ出すときは重ねず、数を返す（open）。
+// 水平の帯・垂直の帯の 2 通りで試し、重ねられない継ぎ目が少なく、長方形が少ないほうを使う。
+function splitHole(poly) {
+  const E = 1e-6, step = (v) => Math.max(0.1, Math.round(v * 10) / 10);
+  // 長方形の向き d（'x' か 'y'）の、重ねる量。金型があれば金型、なければ長方形の寸法の 1/3
+  const ovOf = (r, d) => {
+    const t = pickRectTool(round(r.x1 - r.x0), round(r.y1 - r.y0));
+    const size = t == null ? (d === 'x' ? r.x1 - r.x0 : r.y1 - r.y0) : (d === 'x' ? doc.tools[t].w : doc.tools[t].h);
+    return step(size / 3);
+  };
+  let best = null;
+  for (const part of Geo.rectPartitions(poly)) {
+    const base = part.map((r) => ({ ...r }));
+    const rects = part.map((r) => ({ ...r }));
+    let open = 0;
+    for (let i = 0; i < base.length; i++) {
+      for (let j = 0; j < base.length; j++) {
+        const p = base[i], q = base[j];
+        // p が上・q が下で水平の継ぎ目（Y は上が正）
+        const hSeam = Math.abs(p.y0 - q.y1) < E && Math.min(p.x1, q.x1) - Math.max(p.x0, q.x0) > E;
+        // p が左・q が右で垂直の継ぎ目
+        const vSeam = Math.abs(p.x1 - q.x0) < E && Math.min(p.y1, q.y1) - Math.max(p.y0, q.y0) > E;
+        if (!hSeam && !vSeam) continue;
+        // 伸ばす候補: 継ぎ目に沿った幅が相手に収まるほうを先に
+        const tries = hSeam
+          ? [[j, 'y1', 1, p.y1 - p.y0, 'y', q.x0 >= p.x0 - E && q.x1 <= p.x1 + E], [i, 'y0', -1, q.y1 - q.y0, 'y', p.x0 >= q.x0 - E && p.x1 <= q.x1 + E]]
+          : [[i, 'x1', 1, q.x1 - q.x0, 'x', p.y0 >= q.y0 - E && p.y1 <= q.y1 + E], [j, 'x0', -1, p.x1 - p.x0, 'x', q.y0 >= p.y0 - E && q.y1 <= p.y1 + E]];
+        tries.sort((u, v) => v[5] - u[5]);
+        let done = false;
+        for (const [k, key, dir, depth, d] of tries) {
+          const ov = Math.min(ovOf(rects[k], d), depth);
+          const t = { ...rects[k], [key]: rects[k][key] + dir * ov };
+          if (Geo.rectInside(poly, t)) { rects[k] = t; done = true; break; }
+        }
+        if (!done) open++;
+      }
+    }
+    // 金型が入らない小さい長方形は、穴からはみ出さない所まで広げる
+    for (let k = 0; k < rects.length; k++) {
+      const r = rects[k];
+      if (pickRectTool(round(r.x1 - r.x0), round(r.y1 - r.y0)) == null) rects[k] = Geo.rectGrow(poly, r);
+    }
+    const missing = rects.filter((r) => pickRectTool(round(r.x1 - r.x0), round(r.y1 - r.y0)) == null).length;
+    const score = [open, missing, rects.length];
+    const better = !best || (() => { for (let n = 0; n < score.length; n++) if (score[n] !== best.score[n]) return score[n] < best.score[n]; return false; })();
+    if (better) best = { rects, open, score };
+  }
+  return best || { rects: [], open: 0 };
+}
 function autoLayout() {
   const k = layoutWork;
   if (k == null || !info.outers[k]) return;
@@ -1163,7 +1214,9 @@ function autoLayout() {
   const hits = [], warn = [];
   if (!doc.tools.some((t) => t.shape === 'rect' && t.w && t.h)) warn.push('長方形の金型がありません。「金型」で決めてください。');
   holes.forEach((hole, i) => {
-    for (const r of Geo.rectCover(hole.poly)) {
+    const { rects, open } = splitHole(hole.poly);
+    if (open) warn.push(`穴 ${i + 1} の継ぎ目 ${open} か所は、抜かない所にぶつかるので重ねていません。`);
+    for (const r of rects) {
       const w = round(r.x1 - r.x0), h = round(r.y1 - r.y0);
       const tool = pickRectTool(w, h);
       if (tool == null) warn.push(`穴 ${i + 1} の ${w} × ${h} の部分に入る長方形の金型がありません。`);

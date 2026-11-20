@@ -462,32 +462,28 @@ const Geo = (() => {
     }
     return rects;
   }
-  // 多角形を長方形で覆う（重なってよい。重なった所は 2 度抜くだけ）。
-  // 帯に分けた長方形（水平・垂直のうち数の少ないほう）を、多角形からはみ出さない所まで 4 方向に広げ、
-  // ほかの長方形に含まれてしまうものを除く。細い長方形が減り、大きな金型を使いやすくなる。
-  function rectCover(poly) {
-    const h = slabs(poly, 'y'), v = slabs(poly, 'x');
-    let rects = (v.length < h.length ? v : h).map((r) => ({ ...r }));
+  // 長方形を、多角形からはみ出さない所まで 4 方向に広げる（金型が入らない小さい長方形の救済に使う）
+  function rectGrow(poly, rect) {
+    const r = { ...rect };
     const xs = [...new Set(poly.map((p) => r3(p.x)))].sort((p, q) => p - q);
     const ys = [...new Set(poly.map((p) => r3(p.y)))].sort((p, q) => p - q);
-    for (const r of rects) {
-      for (const [key, cands, dir] of [['x0', xs, -1], ['x1', xs, 1], ['y0', ys, -1], ['y1', ys, 1]]) {
-        const list = cands.filter((c) => (dir < 0 ? c < r[key] - EPS : c > r[key] + EPS));
-        if (dir < 0) list.reverse();
-        for (const c of list) {
-          const t = { ...r, [key]: c };
-          if (!rectInside(poly, t)) break;
-          r[key] = c;
-        }
+    for (const [key, cands, dir] of [['x0', xs, -1], ['x1', xs, 1], ['y0', ys, -1], ['y1', ys, 1]]) {
+      const list = cands.filter((c) => (dir < 0 ? c < r[key] - EPS : c > r[key] + EPS));
+      if (dir < 0) list.reverse();
+      for (const c of list) {
+        if (!rectInside(poly, { ...r, [key]: c })) break;
+        r[key] = c;
       }
     }
-    const within = (p, q) => p.x0 >= q.x0 - EPS && p.x1 <= q.x1 + EPS && p.y0 >= q.y0 - EPS && p.y1 <= q.y1 + EPS;
-    rects = rects.filter((p, i) => !rects.some((q, j) => j !== i && within(p, q) && (!within(q, p) || j < i)));
-    return rects;
+    return r;
+  }
+  // 多角形を、重ならずに接する長方形に分ける。水平の帯と垂直の帯の 2 通りを返す
+  function rectPartitions(poly) {
+    return [slabs(poly, 'y'), slabs(poly, 'x')];
   }
 
   return {
-    EPS, AXES, r3, rectCover, rectInside, pointById, lineById, analyze, build, addDim, setDimValue, moveItems,
+    EPS, AXES, r3, rectGrow, rectPartitions, rectInside, pointById, lineById, analyze, build, addDim, setDimValue, moveItems,
     strokeToPolyline, cleanPolyline, deleteLines, closedShapes, classifyShapes, inside, overlaps,
   };
 })();
