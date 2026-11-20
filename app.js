@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.17.2';
+const APP_VERSION = '0.17.3';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1314,6 +1314,25 @@ function splitHole(poly) {
   }
   return best || { rects: [], open: 0 };
 }
+// 切り欠きの長方形 r を、外形を囲む四角 box の辺に乗っている側（r0 で判断）だけ外へ広げて、長方形の金型が
+// ちょうど入る大きさにする。はみ出す量がいちばん少ないものを選ぶ（同じなら大きい金型）。ほかのワークにぶつかるものは使わない
+function growOutward(r, r0, box, others) {
+  const E = 1e-6;
+  const can = { x0: Math.abs(r0.x0 - box.x0) < E, x1: Math.abs(r0.x1 - box.x1) < E, y0: Math.abs(r0.y0 - box.y0) < E, y1: Math.abs(r0.y1 - box.y1) < E };
+  let best = null;
+  doc.tools.forEach((t) => {
+    if (t.shape !== 'rect' || !t.w || !t.h) return;
+    const g = { ...r };
+    const needW = t.w - (r.x1 - r.x0), needH = t.h - (r.y1 - r.y0);
+    if (needW > E) { if (can.x0) g.x0 -= needW; else if (can.x1) g.x1 += needW; else return; }
+    if (needH > E) { if (can.y0) g.y0 -= needH; else if (can.y1) g.y1 += needH; else return; }
+    const gp = [{ x: g.x0, y: g.y0 }, { x: g.x1, y: g.y0 }, { x: g.x1, y: g.y1 }, { x: g.x0, y: g.y1 }];
+    if (others.some((p) => Geo.overlaps(p, gp))) return;
+    const extra = (g.x1 - g.x0) * (g.y1 - g.y0) - (r.x1 - r.x0) * (r.y1 - r.y0);
+    if (!best || extra < best.extra - E || (Math.abs(extra - best.extra) < E && t.w * t.h > best.area)) best = { g, extra, area: t.w * t.h };
+  });
+  return best && { x0: round(best.g.x0), y0: round(best.g.y0), x1: round(best.g.x1), y1: round(best.g.y1) };
+}
 function autoLayout() {
   const k = layoutWork;
   if (k == null || !info.outers[k]) return;
@@ -1363,7 +1382,12 @@ function autoLayout() {
         const rp = [{ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }];
         const hitOther = others.some((p) => Geo.overlaps(p, rp));
         if (hitOther) blocked = true;
-        const use = hitOther ? r0 : r;
+        let use = hitOther ? r0 : r;
+        // 入る長方形の金型がないときは、1/3 の重なりにこだわらず、外形の外へはみ出させて金型が入る大きさにする
+        if (pickRectTool(round(use.x1 - use.x0), round(use.y1 - use.y0)) == null) {
+          const grown = growOutward(use, r0, box, others);
+          if (grown) use = grown;
+        }
         const hit = rectHit(use, { kind: 'notch' });
         if (hit.tool == null) warn.push(`切り欠き ${i + 1} の ${round(use.x1 - use.x0)} × ${round(use.y1 - use.y0)} の部分に入る長方形の金型がありません。`);
         nh.push(hit);
