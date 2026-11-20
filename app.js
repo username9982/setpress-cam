@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.8.0';
+const APP_VERSION = '0.8.1';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -517,7 +517,7 @@ function hitTest(sx, sy) {
 }
 
 // ---- タッチ・マウス操作 ----
-// 指1本: なぞって描く／選ぶ・動かす。指2本: 拡大縮小と移動。
+// 指1本: 作図ではなぞって描く、寸法ではタップで選ぶ、移動ではつかんで動かす。指2本: 拡大縮小と画面の移動。
 let mode = 'draw';
 const pointers = new Map();
 let drag = null;  // {kind:'stroke'|'press'|'move'|'pinch', ...}
@@ -588,9 +588,9 @@ canvas.addEventListener('pointermove', (e) => {
     drag.raw.push({ x: wx, y: wy });
     draw();
   } else if (drag.kind === 'press') {
-    // 点か線を押したまま 8px 動いたら、動かし始める
+    // 「移動」で点か線を押したまま 8px 動いたら、動かし始める
     const h = drag.hit;
-    if (h && h.t !== 'dim' && Math.hypot(pos[0] - drag.start[0], pos[1] - drag.start[1]) > 8) {
+    if (mode === 'move' && h && h.t !== 'dim' && Math.hypot(pos[0] - drag.start[0], pos[1] - drag.start[1]) > 8) {
       snapshot();
       // 線は平行に動かす（両端につながった線が伸び縮みする）。点はまとまりごと動かす
       drag = {
@@ -637,7 +637,7 @@ function endPointer(e) {
     if (e.type !== 'pointercancel') commitStroke(d.raw);
     draw();
   } else if (d.kind === 'press') {
-    tapSelect(d.hit);
+    if (mode === 'dim') tapSelect(d.hit);
   } else if (d.kind === 'move') {
     const movedAny = doc.points.some((p, i) => p.x !== d.orig[i].x || p.y !== d.orig[i].y);
     if (movedAny) changed(); else { undoStack.pop(); draw(); }
@@ -674,8 +674,11 @@ document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
 
 // ---- 画面の部品 ----
+// 作図: なぞって線を描く。寸法: 要素をタップして寸法を入れる。移動: 線・点をつかんで動かす。
+// 選んだものは「寸法」でだけ使うので、ほかに切り替えたら選択を解く。
 function setMode(m) {
   mode = m;
+  if (m !== 'dim' && sel.length) { sel = []; updateUi(); draw(); }
   document.querySelectorAll('button.mode').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
   canvas.dataset.mode = m;
 }
@@ -981,11 +984,12 @@ function renderCode() {
   lastCodeSel = sig;
 }
 
-// 行をタップすると、その要素を選ぶ
+// 行をタップすると、「寸法」にしてその要素を選ぶ
 $('code')?.addEventListener('click', (e) => {
   const row = e.target.closest('.ln.rect');
   if (!row || (window.getSelection && String(window.getSelection()).length)) return;
   const [t, id] = row.dataset.key.split(':');
+  setMode('dim');
   sel = [{ t, id: Number(id) }];
   updateUi();
   draw();
