@@ -47,6 +47,8 @@ body {
 #toolbar .group { display: flex; gap: 6px; align-items: center; }
 #toolbar .group.right { margin-left: auto; }
 #toolbar label { display: flex; gap: 4px; align-items: center; white-space: nowrap; }
+/* ツールバーのボタンは少し詰める（iPad の横向きで 1 段に収めるため。押せる大きさは 56×44 px 以上） */
+#toolbar button { min-width: 56px; padding: 0 10px; }
 
 button {
   min-height: 44px;

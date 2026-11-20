@@ -21,15 +21,16 @@
   #work { display: flex; flex: 1; min-height: 0; }
   #stage { position: relative; flex: 1; min-width: 0; min-height: 0; }
 </style>
-<link rel="stylesheet" href="style.css?v=0.13.0">
+<link rel="stylesheet" href="style.css?v=0.13.1">
 <!-- ?v= は tools/bump_version.py で書き換える。古い style.css・app.js と組み合わさらないようにするため -->
 </head>
 <body>
 <header id="toolbar">
   <div class="group">
     <button id="btn-draw" class="mode active" data-mode="draw">作図</button>
-    <button id="btn-dim" class="mode" data-mode="dim">寸法</button>
     <button id="btn-move" class="mode" data-mode="move">移動</button>
+    <button id="btn-dim" class="mode" data-mode="dim">寸法</button>
+    <button id="btn-layout" class="mode" data-mode="layout">割付</button>
   </div>
   <div class="group">
     <button id="btn-undo">元に戻す</button>
@@ -132,7 +133,7 @@
   </form>
 </dialog>
 
-<script src="geom.js?v=0.13.0"></script>
-<script src="app.js?v=0.13.0"></script>
+<script src="geom.js?v=0.13.1"></script>
+<script src="app.js?v=0.13.1"></script>
 </body>
 </html>
