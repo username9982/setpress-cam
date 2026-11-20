@@ -86,6 +86,27 @@ input[type=number], input[type=text], select {
 #work { display: flex; flex: 1; min-height: 0; }
 #stage { position: relative; flex: 1; min-width: 0; min-height: 0; }
 
+/* 描く領域と、その左の割付の区画（割付のときだけ出す） */
+#main-row { display: flex; flex: 1; min-width: 0; min-height: 0; }
+[hidden] { display: none !important; }
+#layout-panel {
+  display: flex;
+  flex-direction: column;
+  width: 260px;
+  flex: none;
+  border-right: 1px solid var(--line);
+  background: #fbfcfd;
+}
+#layout-body { padding: 10px 12px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+#layout-body button { width: 100%; }
+.lp-row { display: flex; gap: 8px; align-items: baseline; }
+.lp-label { color: #667; font-size: 13px; flex: none; }
+#lp-work { font-weight: 700; }
+#lp-summary { font-size: 14px; line-height: 1.6; white-space: pre-wrap; }
+#lp-warn { margin: 0; padding-left: 1.2em; color: #b3261e; font-size: 13px; line-height: 1.5; }
+#lp-warn:empty { display: none; }
+.lp-note { margin: 0; font-size: 12px; color: #667; line-height: 1.5; }
+
 /* コードの区画: 横向きは右側、縦向きは下側 */
 #code-panel {
   display: flex;

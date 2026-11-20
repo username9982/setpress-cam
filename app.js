@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.13.1';
+const APP_VERSION = '0.14.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -35,6 +35,7 @@ function newDoc() {
     program: null,  // プログラム番号
     tools: Array.from({ length: TOOL_COUNT }, emptyTool),
     sheet: { w: 1000, h: 500, t: null },  // t: 板厚（mm、未設定は null）
+    layouts: [],  // 割付 [{work: 外形の点, src: 割付したときの穴の形, hits: [{tool, x0, y0, x1, y1}], warn: []}]
     points: [],
     lines: [],
     dims: [],
@@ -117,6 +118,7 @@ function sheetPos(k, axis) {
 }
 function sheetDimOf(k, axis) { return doc.dims.find((d) => d.kind === 'sheet' && d.axis === axis && info.owner.get(d.b) === k); }
 function refresh() {
+  if (!Array.isArray(doc.layouts)) doc.layouts = [];  // v0.14 より前の履歴から戻したとき
   info = Geo.analyze(doc);
   shapes = info.shapes;
   updateUi();
@@ -264,6 +266,7 @@ function draw() {
 
   // 閉じた図形の塗り → 寸法 → 線 → 点 → 原点 の順に重ねる
   drawFills();
+  if (mode === 'layout') drawLayout();
   dimHits = [];
   originHits = [];
   layoutDims().forEach((lv, i) => { if (doc.dims[i].kind === 'sheet') drawSheetDim(doc.dims[i]); else drawDim(doc.dims[i], lv); });
@@ -833,6 +836,7 @@ function endPointer(e) {
   } else if (d.kind === 'press') {
     if (mode === 'dim') tapSelect(d.hit);
     else if (mode === 'move') tapSelectMany(d.hit);
+    else if (mode === 'layout') tapWork(d.hit, d.world);
   } else if (d.kind === 'move') {
     const movedAny = doc.points.some((p, i) => p.x !== d.orig[i].x || p.y !== d.orig[i].y) ||
       d.dims.some((m) => { const q = D(m.id); return q && q.off !== m.before; });
@@ -885,7 +889,9 @@ function setMode(m) {
   if (sel.length) { sel = []; updateUi(); draw(); }  // 寸法と移動では選び方が違うので、切り替えたら外す
   document.querySelectorAll('button.mode').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
   canvas.dataset.mode = m;
-  if (m === 'layout') flash('割付はこれから作ります');  // 割付: 機能はこれから作る（いまは何もしない）
+  $('layout-panel').hidden = m !== 'layout';  // 割付のときだけ左に割付の区画を出す
+  updateLayoutPanel();
+  draw();
 }
 document.querySelectorAll('button.mode').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
 
@@ -1116,7 +1122,144 @@ function updateUi() {
   $('st-tools').textContent = doc.tools.map((t, i) => (t.shape === 'none' ? null : `T${i + 1} ${toolText(t)}`))
     .filter(Boolean).join('　') || '金型なし';
   updateProps();
+  updateLayoutPanel();
   renderCode();
+}
+
+// ---- 割付 ----
+// 「割付」で図形（外形）をタップして選び、「自動割付」で穴を F3 で抜くプログラムを作る。
+let layoutWork = null;  // 選んだ外形の番号（info.outers の番号）
+function tapWork(hit, world) {
+  let k = hit && hit.t === 'origin' ? hit.id : info.outerAt(world[0], world[1]);
+  if (k == null && hit && hit.t === 'line') k = info.owner.get(L(hit.id).a) ?? null;
+  if (k == null && hit && hit.t === 'point') k = info.owner.get(hit.id) ?? null;
+  layoutWork = k;
+  updateLayoutPanel();
+  renderCode();
+  draw();
+}
+function workKey(k) { return info.outers[k].ref.x; }  // 外形を表す点（外形のいちばん左の点）
+function layoutOf(k) { return doc.layouts.find((q) => info.owner.get(q.work) === k) || null; }
+// 外形の穴（いまの形）。割付したときの形と比べて、変わっていないか確かめる
+function holesOf(k) { return shapes.filter((s) => s.role === 'hole' && s.outer === k); }
+function holeSrc(k) {
+  const o = info.outers[k].origin;
+  return JSON.stringify(holesOf(k).map((s) => s.poly.map((v) => [round(v.x - o.x), round(o.y - v.y)])));
+}
+// 長方形の金型（番号）のうち、w × h の長方形に入るいちばん大きいもの
+function pickRectTool(w, h) {
+  let best = null;
+  doc.tools.forEach((t, i) => {
+    if (t.shape !== 'rect' || !t.w || !t.h) return;
+    if (t.w > w + 1e-6 || t.h > h + 1e-6) return;
+    if (best == null || t.w * t.h > doc.tools[best].w * doc.tools[best].h) best = i;
+  });
+  return best;
+}
+function autoLayout() {
+  const k = layoutWork;
+  if (k == null || !info.outers[k]) return;
+  const holes = holesOf(k);
+  const hits = [], warn = [];
+  if (!doc.tools.some((t) => t.shape === 'rect' && t.w && t.h)) warn.push('長方形の金型がありません。「金型」で決めてください。');
+  holes.forEach((hole, i) => {
+    for (const r of Geo.rectCover(hole.poly)) {
+      const w = round(r.x1 - r.x0), h = round(r.y1 - r.y0);
+      const tool = pickRectTool(w, h);
+      if (tool == null) warn.push(`穴 ${i + 1} の ${w} × ${h} の部分に入る長方形の金型がありません。`);
+      hits.push({ tool, x0: round(r.x0), y0: round(r.y0), x1: round(r.x1), y1: round(r.y1) });
+    }
+  });
+  // 上から下、左から右の順に抜く
+  hits.sort((p, q) => q.y1 - p.y1 || p.x0 - q.x0);
+  snapshot();
+  const key = workKey(k);
+  doc.layouts = doc.layouts.filter((q) => info.owner.get(q.work) !== k);
+  doc.layouts.push({ work: key, src: holeSrc(k), hits, warn });
+  changed();
+  flash(holes.length ? `S${k + 1} の穴 ${holes.length} 個を F3 ${hits.length} 回で割り付けました` : `S${k + 1} には穴がありません`);
+}
+function clearLayout() {
+  const k = layoutWork;
+  if (k == null || !layoutOf(k)) return;
+  snapshot();
+  doc.layouts = doc.layouts.filter((q) => info.owner.get(q.work) !== k);
+  changed();
+}
+$('btn-autolayout').addEventListener('click', autoLayout);
+$('btn-clearlayout').addEventListener('click', clearLayout);
+
+function updateLayoutPanel() {
+  const panel = $('layout-panel');
+  if (!panel || panel.hidden) return;
+  if (layoutWork != null && !info.outers[layoutWork]) layoutWork = null;
+  const k = layoutWork;
+  $('lp-work').textContent = k == null ? '図形をタップして選ぶ' : `S${k + 1}`;
+  $('btn-autolayout').disabled = k == null;
+  const lay = k == null ? null : layoutOf(k);
+  $('btn-clearlayout').disabled = !lay;
+  const warn = [];
+  let summary = '';
+  if (k != null) {
+    const holes = holesOf(k);
+    summary = `穴 ${holes.length} 個`;
+    if (lay) {
+      summary += `\nF3 ${lay.hits.length} 回`;
+      const used = [...new Set(lay.hits.map((h) => h.tool).filter((t) => t != null))];
+      if (used.length) summary += `\n金型 ${used.map((t) => `T${t + 1} ${toolText(doc.tools[t])}`).join('、')}`;
+      warn.push(...lay.warn);
+      if (lay.src !== holeSrc(k)) warn.push('割付のあとで図形が変わりました。もう一度「自動割付」を押してください。');
+    } else {
+      summary += '\nまだ割り付けていません';
+    }
+    const notches = shapes.filter((s) => s.role === 'notch' && s.outer === k).length;
+    if (notches) warn.push(`切り欠き ${notches} 個は、まだ割り付けません。`);
+  }
+  $('lp-summary').textContent = summary;
+  const ul = $('lp-warn');
+  ul.textContent = '';
+  for (const w of warn) { const li = document.createElement('li'); li.textContent = w; ul.append(li); }
+}
+
+// 割付の表示: 選んだ外形を太く縁取り、F3 で抜く長方形（破線）と、開始点（左上）に置く金型（塗り）を描く
+const LAYOUT_COLOR = '#1f8a4c';
+function drawLayout() {
+  const k = layoutWork;
+  if (k != null && info.outers[k]) {
+    const sh = shapes[info.outers[k].shape];
+    ctx.save();
+    ctx.strokeStyle = COLOR.selected;
+    ctx.lineWidth = 6;
+    ctx.globalAlpha = 0.45;
+    ctx.beginPath();
+    sh.poly.forEach((v, i) => { const [x, y] = toScreen(v.x, v.y); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+  for (const lay of doc.layouts) {
+    if (info.owner.get(lay.work) == null) continue;
+    lay.hits.forEach((h, i) => {
+      const [ax, ay] = toScreen(h.x0, h.y1), [bx, by] = toScreen(h.x1, h.y0);
+      const col = h.tool == null ? '#b3261e' : LAYOUT_COLOR;
+      ctx.save();
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 3]);
+      ctx.strokeRect(ax, ay, bx - ax, by - ay);
+      ctx.setLineDash([]);
+      const t = h.tool == null ? null : doc.tools[h.tool];
+      if (t) {
+        ctx.fillStyle = 'rgba(31, 138, 76, 0.28)';
+        ctx.fillRect(ax, ay, t.w * view.scale, t.h * view.scale);
+      }
+      ctx.fillStyle = col;
+      ctx.font = 'bold 12px sans-serif';
+      ctx.textBaseline = 'top';
+      ctx.fillText(`${i + 1}`, ax + 3, ay + 2);
+      ctx.restore();
+    });
+  }
 }
 
 // ---- 図形データの区画 ----
@@ -1132,6 +1275,27 @@ function genCode() {
   add(`; 板厚 ${doc.sheet.t ? `${fmt(doc.sheet.t)} mm` : '未設定'}`, null, true);
   add(programText(doc.program), null);
   doc.tools.forEach((t, i) => add(`; T${i + 1} ${toolText(t)}`, null, true));
+  // 割付（いちばん上に出す）: 機械に手で打ち込む順に並べる。F3 のあとに 左上の開始点 → XY 寸法 → 金型の XY 寸法
+  for (const lay of doc.layouts) {
+    const k = info.owner.get(lay.work);
+    if (k == null) continue;
+    const o = info.outers[k].origin;
+    add('', null);
+    add(`; S${k + 1} 割付（穴）  F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法`, null, true);
+    if (lay.src !== holeSrc(k)) add('; ※ 割付のあとで図形が変わりました。もう一度自動割付してください', null, true);
+    const xy = (x, y, note) => `  ${('X' + fmt(x)).padEnd(8)}${('Y' + fmt(y)).padEnd(8)}; ${note}`;
+    let curTool = null;
+    lay.hits.forEach((h, i) => {
+      const t = h.tool == null ? null : doc.tools[h.tool];
+      add(`; ${i + 1}`, null, true);
+      if (h.tool != null && h.tool !== curTool) { add(`T${h.tool + 1}`, null); curTool = h.tool; }
+      add('F3', null);
+      add(xy(h.x0 - o.x, o.y - h.y1, '開始点'), null);
+      add(xy(h.x1 - h.x0, h.y1 - h.y0, '寸法'), null);
+      add(t ? xy(t.w, t.h, '金型') : '  ?       ?       ; 金型（入る長方形の金型がない）', null);
+    });
+    if (!lay.hits.length) add('; 穴がありません', null, true);
+  }
   add('', null);
   // 外形ごとに、原点からの座標で並べる（Y は下へ正）。外形に入らないものは最後に板の左上から。
   const roleName = { hole: '穴', notch: '切り欠き' };
@@ -1342,6 +1506,13 @@ function loadDoc(d) {
     tools: normalizeTools(d.tools),
     sheet: { w: Number(d.sheet.w) || 1000, h: Number(d.sheet.h) || 500, t: posNum(d.sheet.t) },
     points, lines, dims,
+    layouts: (Array.isArray(d.layouts) ? d.layouts : []).filter((q) => q && ids.has(Number(q.work))).map((q) => ({
+      work: Number(q.work), src: String(q.src || ''),
+      hits: (Array.isArray(q.hits) ? q.hits : []).map((h) => ({
+        tool: Number.isInteger(h.tool) ? h.tool : null, x0: num(h.x0), y0: num(h.y0), x1: num(h.x1), y1: num(h.y1),
+      })).filter((h) => [h.x0, h.y0, h.x1, h.y1].every(Number.isFinite)),
+      warn: (Array.isArray(q.warn) ? q.warn : []).map(String),
+    })),
     nextId: Math.max(Number(d.nextId) || 1, maxId + 1),
   };
   sel = [];

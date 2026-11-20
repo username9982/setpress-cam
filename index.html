@@ -19,9 +19,11 @@
   html, body { height: 100%; margin: 0; }
   body { display: flex; flex-direction: column; }
   #work { display: flex; flex: 1; min-height: 0; }
+  #main-row { display: flex; flex: 1; min-width: 0; min-height: 0; }
+  [hidden] { display: none !important; }
   #stage { position: relative; flex: 1; min-width: 0; min-height: 0; }
 </style>
-<link rel="stylesheet" href="style.css?v=0.13.1">
+<link rel="stylesheet" href="style.css?v=0.14.0">
 <!-- ?v= は tools/bump_version.py で書き換える。古い style.css・app.js と組み合わさらないようにするため -->
 </head>
 <body>
@@ -58,10 +60,26 @@
 </header>
 
 <div id="work">
+<div id="main-row">
+<aside id="layout-panel" hidden>
+  <div class="code-head">
+    <span class="code-title">割付</span>
+    <span class="code-note">穴を F3 で抜く</span>
+  </div>
+  <div id="layout-body">
+    <div class="lp-row"><span class="lp-label">ワーク</span><span id="lp-work">図形をタップして選ぶ</span></div>
+    <button id="btn-autolayout" type="button" class="primary" disabled>自動割付</button>
+    <button id="btn-clearlayout" type="button" disabled>割付を消す</button>
+    <div id="lp-summary"></div>
+    <ul id="lp-warn"></ul>
+    <p class="lp-note">穴を長方形に分けて、それぞれ F3（開始点 左上 → XY 寸法 → 金型 XY 寸法）で抜きます。金型は長方形の金型のうち、穴に入るいちばん大きいものを使います。</p>
+  </div>
+</aside>
 <main id="stage">
   <canvas id="canvas"></canvas>
   <div id="props" hidden></div>
 </main>
+</div>
 
 <aside id="code-panel">
   <div class="code-head">
@@ -133,7 +151,7 @@
   </form>
 </dialog>
 
-<script src="geom.js?v=0.13.1"></script>
-<script src="app.js?v=0.13.1"></script>
+<script src="geom.js?v=0.14.0"></script>
+<script src="app.js?v=0.14.0"></script>
 </body>
 </html>

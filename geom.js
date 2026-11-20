@@ -408,8 +408,86 @@ const Geo = (() => {
     return shapes;
   }
 
+  // ---- 割付: 水平・垂直の辺だけの多角形を長方形で覆う ----
+  // 長方形 {x0, y0, x1, y1}（x0 < x1、y0 < y1）が多角形の中に収まるか（辺の上は中とみなす）
+  function rectInside(poly, r) {
+    if (inside(poly, (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2) < 0) return false;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      if (Math.abs(a.y - b.y) < EPS) {
+        // 水平な辺が長方形の内側を横切るか
+        if (a.y > r.y0 + EPS && a.y < r.y1 - EPS && Math.max(a.x, b.x) > r.x0 + EPS && Math.min(a.x, b.x) < r.x1 - EPS) return false;
+      } else if (a.x > r.x0 + EPS && a.x < r.x1 - EPS && Math.max(a.y, b.y) > r.y0 + EPS && Math.min(a.y, b.y) < r.y1 - EPS) {
+        return false;
+      }
+    }
+    return true;
+  }
+  // 帯に切って長方形に分ける。axis 'y' なら水平の帯（頂点の Y で切る）、'x' なら垂直の帯
+  function slabs(poly, axis) {
+    const other = axis === 'y' ? 'x' : 'y';
+    const cuts = [...new Set(poly.map((v) => r3(v[axis])))].sort((p, q) => p - q);
+    let rects = [];
+    for (let i = 0; i + 1 < cuts.length; i++) {
+      const lo = cuts[i], hi = cuts[i + 1], mid = (lo + hi) / 2;
+      // 帯の真ん中を横切る辺の位置
+      const xs = [];
+      for (let j = 0; j < poly.length; j++) {
+        const a = poly[j], b = poly[(j + 1) % poly.length];
+        if (Math.abs(a[other] - b[other]) < EPS && (a[axis] > mid) !== (b[axis] > mid)) xs.push(a[other]);
+      }
+      xs.sort((p, q) => p - q);
+      for (let k = 0; k + 1 < xs.length; k += 2) {
+        rects.push(axis === 'y' ? { x0: xs[k], x1: xs[k + 1], y0: lo, y1: hi } : { y0: xs[k], y1: xs[k + 1], x0: lo, x1: hi });
+      }
+    }
+    // 隣り合って幅が同じ帯はつなぐ
+    let merged = true;
+    while (merged) {
+      merged = false;
+      outer: for (let i = 0; i < rects.length; i++) {
+        for (let j = 0; j < rects.length; j++) {
+          if (i === j) continue;
+          const p = rects[i], q = rects[j];
+          const same = axis === 'y' ? Math.abs(p.x0 - q.x0) < EPS && Math.abs(p.x1 - q.x1) < EPS && Math.abs(p.y1 - q.y0) < EPS
+            : Math.abs(p.y0 - q.y0) < EPS && Math.abs(p.y1 - q.y1) < EPS && Math.abs(p.x1 - q.x0) < EPS;
+          if (same) {
+            rects[i] = axis === 'y' ? { ...p, y1: q.y1 } : { ...p, x1: q.x1 };
+            rects.splice(j, 1);
+            merged = true;
+            break outer;
+          }
+        }
+      }
+    }
+    return rects;
+  }
+  // 多角形を長方形で覆う（重なってよい。重なった所は 2 度抜くだけ）。
+  // 帯に分けた長方形（水平・垂直のうち数の少ないほう）を、多角形からはみ出さない所まで 4 方向に広げ、
+  // ほかの長方形に含まれてしまうものを除く。細い長方形が減り、大きな金型を使いやすくなる。
+  function rectCover(poly) {
+    const h = slabs(poly, 'y'), v = slabs(poly, 'x');
+    let rects = (v.length < h.length ? v : h).map((r) => ({ ...r }));
+    const xs = [...new Set(poly.map((p) => r3(p.x)))].sort((p, q) => p - q);
+    const ys = [...new Set(poly.map((p) => r3(p.y)))].sort((p, q) => p - q);
+    for (const r of rects) {
+      for (const [key, cands, dir] of [['x0', xs, -1], ['x1', xs, 1], ['y0', ys, -1], ['y1', ys, 1]]) {
+        const list = cands.filter((c) => (dir < 0 ? c < r[key] - EPS : c > r[key] + EPS));
+        if (dir < 0) list.reverse();
+        for (const c of list) {
+          const t = { ...r, [key]: c };
+          if (!rectInside(poly, t)) break;
+          r[key] = c;
+        }
+      }
+    }
+    const within = (p, q) => p.x0 >= q.x0 - EPS && p.x1 <= q.x1 + EPS && p.y0 >= q.y0 - EPS && p.y1 <= q.y1 + EPS;
+    rects = rects.filter((p, i) => !rects.some((q, j) => j !== i && within(p, q) && (!within(q, p) || j < i)));
+    return rects;
+  }
+
   return {
-    EPS, AXES, r3, pointById, lineById, analyze, build, addDim, setDimValue, moveItems,
+    EPS, AXES, r3, rectCover, rectInside, pointById, lineById, analyze, build, addDim, setDimValue, moveItems,
     strokeToPolyline, cleanPolyline, deleteLines, closedShapes, classifyShapes, inside, overlaps,
   };
 })();
