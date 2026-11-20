@@ -3,9 +3,12 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.10.1';
+const APP_VERSION = '0.10.2';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
+const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
+const UNDO_MAX = 2000;  // 履歴の数の上限
+const UNDO_CHARS = 2000000;  // 履歴の文字数の上限（localStorage はおよそ 500 万文字まで）。超えたら古いものから捨てる
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('canvas');
@@ -72,7 +75,8 @@ const undoStack = [];
 function newId() { return doc.nextId++; }
 function snapshot() {
   undoStack.push(JSON.stringify(doc));
-  if (undoStack.length > 100) undoStack.shift();
+  let total = undoStack.reduce((n, t) => n + t.length, 0);
+  while (undoStack.length > 1 && (undoStack.length > UNDO_MAX || total > UNDO_CHARS)) total -= undoStack.shift().length;
 }
 function undo() {
   if (!undoStack.length) return;
@@ -120,6 +124,22 @@ function refresh() {
 }
 function saveCurrent() {
   try { localStorage.setItem(CURRENT_KEY, JSON.stringify({ doc, dirty })); } catch (e) { /* 保存できなくても続ける */ }
+  saveUndo();
+}
+// 履歴を保存する。入りきらなければ古いものから半分ずつ捨てて入れ直す（図面のほうを先に保存してある）
+function saveUndo() {
+  for (;;) {
+    try { localStorage.setItem(UNDO_KEY, JSON.stringify(undoStack)); return; } catch (e) {
+      if (!undoStack.length) return;
+      undoStack.splice(0, Math.ceil(undoStack.length / 2));
+    }
+  }
+}
+function loadUndo() {
+  try {
+    const st = JSON.parse(localStorage.getItem(UNDO_KEY));
+    return Array.isArray(st) ? st.filter((t) => typeof t === 'string') : [];
+  } catch (e) { return []; }
 }
 function round(v) { return Math.round(v * 1000) / 1000; }
 
@@ -1490,7 +1510,13 @@ window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault()
   $('st-ver').textContent = `v${APP_VERSION}`;
   try {
     const cur = JSON.parse(localStorage.getItem(CURRENT_KEY));
-    if (cur && cur.doc) { resize(); loadDoc(cur.doc); dirty = !!cur.dirty; saveCurrent(); updateUi(); return; }
+    if (cur && cur.doc) {
+      const history = loadUndo();  // loadDoc が履歴を空にして保存する前に読んでおく
+      resize(); loadDoc(cur.doc);
+      undoStack.push(...history);
+      dirty = !!cur.dirty; saveCurrent(); updateUi();
+      return;
+    }
   } catch (e) { /* 壊れていたら新しく始める */ }
   setMode('draw');
   refresh();
