@@ -19,14 +19,13 @@
   #work { display: flex; flex: 1; min-height: 0; }
   #stage { position: relative; flex: 1; min-width: 0; min-height: 0; }
 </style>
-<link rel="stylesheet" href="style.css?v=0.6.0">
+<link rel="stylesheet" href="style.css?v=0.7.0">
 <!-- ?v= は tools/bump_version.py で書き換える。古い style.css・app.js と組み合わさらないようにするため -->
 </head>
 <body>
 <header id="toolbar">
   <div class="group">
-    <button id="btn-origin" class="mode active" data-mode="origin">原点</button>
-    <button id="btn-draw" class="mode" data-mode="draw">描く</button>
+    <button id="btn-draw" class="mode active" data-mode="draw">描く</button>
     <button id="btn-select" class="mode" data-mode="select">選ぶ</button>
   </div>
   <div class="group">
@@ -129,7 +128,7 @@
   </form>
 </dialog>
 
-<script src="geom.js?v=0.6.0"></script>
-<script src="app.js?v=0.6.0"></script>
+<script src="geom.js?v=0.7.0"></script>
+<script src="app.js?v=0.7.0"></script>
 </body>
 </html>

@@ -4,7 +4,9 @@
 //
 // 線は水平か垂直だけなので、X と Y を別々に扱える。各方向で「b − a = 値」の関係
 // （水平線は両端の Y が同じ、垂直線は X が同じ、寸法は入れた値）を重み付きの Union-Find でつなぐ。
-// ワーク原点と同じまとまりに入った点は、その方向で位置が確定する。
+// ワーク原点は閉じた図形の外形ごとに持ち、外形を囲む四角の左上に置く（Y は下へ正）。
+// X は外形のいちばん左の点、Y はいちばん上の点を基準にし、基準と同じまとまりに入った点がその方向で確定する。
+// 穴・切り欠き、外形につながる線は、その外形の原点から測る。
 // 点の座標はいつもすべての関係を満たすように保つ（寸法を入れたら、動かす側のまとまりを平行移動する）。
 
 const Geo = (() => {
@@ -60,14 +62,66 @@ const Geo = (() => {
     return uf;
   }
 
-  // 解析: 方向ごとのまとまりと、確定した点
+  // 外形ごとの原点と、点がどの外形に属するか
+  // outers: [{shape（shapes の番号）, origin:{x, y}, ref:{x: 点, y: 点}}]
+  // ref.x はいちばん左の点（同じなら上の点）、ref.y はいちばん上の点（同じなら左の点）。
+  function outerFrames(doc, shapes) {
+    const outers = [];
+    const outerOf = new Map();  // shapes の番号 → outers の番号
+    shapes.forEach((s, i) => {
+      if (s.role !== 'outer') return;
+      const pts = s.pointIds.map((id) => pointById(doc, id));
+      const minX = Math.min(...pts.map((p) => p.x)), maxY = Math.max(...pts.map((p) => p.y));
+      const pick = (f) => pts.slice().sort(f)[0].id;
+      outerOf.set(i, outers.length);
+      outers.push({
+        shape: i,
+        origin: { x: minX, y: maxY },
+        ref: { x: pick((p, q) => p.x - q.x || q.y - p.y), y: pick((p, q) => q.y - p.y || p.x - q.x) },
+      });
+    });
+    const owner = new Map();  // 点 → outers の番号
+    shapes.forEach((s, i) => {
+      s.outer = outerOf.get(s.role === 'outer' ? i : s.parent);
+      for (const id of s.pointIds) owner.set(id, s.outer);
+    });
+    // 線でつながった点は、同じ外形に入れる
+    const queue = [...owner.keys()];
+    while (queue.length) {
+      const id = queue.shift();
+      for (const l of doc.lines) {
+        const other = l.a === id ? l.b : l.b === id ? l.a : null;
+        if (other == null || owner.has(other)) continue;
+        owner.set(other, owner.get(id));
+        queue.push(other);
+      }
+    }
+    // 残りは、内側にある外形（いちばん小さいもの）に入れる
+    const outerAt = (x, y) => {
+      let best = null;
+      outers.forEach((o, k) => {
+        const s = shapes[o.shape];
+        if (inside(s.poly, x, y) >= 0 && (best == null || s.area < shapes[outers[best].shape].area)) best = k;
+      });
+      return best;
+    };
+    for (const p of doc.points) if (!owner.has(p.id)) { const k = outerAt(p.x, p.y); if (k != null) owner.set(p.id, k); }
+    return { outers, owner, outerAt };
+  }
+
+  // 解析: 閉じた図形、外形ごとの原点、方向ごとのまとまりと確定した点
   function analyze(doc) {
     const uf = { x: build(doc, 'x'), y: build(doc, 'y') };
-    const o = doc.originId;
-    const fixedAxis = (pid, axis) => o != null && uf[axis].same(pid, o);
+    const shapes = classifyShapes(closedShapes(doc));
+    const { outers, owner, outerAt } = outerFrames(doc, shapes);
+    const anchors = { x: new Set(outers.map((o) => uf.x.find(o.ref.x))), y: new Set(outers.map((o) => uf.y.find(o.ref.y))) };
+    const fixedAxis = (pid, axis) => {
+      const k = owner.get(pid);
+      return k != null && uf[axis].same(pid, outers[k].ref[axis]);
+    };
     const fixedPoint = (pid) => fixedAxis(pid, 'x') && fixedAxis(pid, 'y');
     const fixedLine = (l) => fixedPoint(l.a) && fixedPoint(l.b);
-    return { uf, fixedAxis, fixedPoint, fixedLine };
+    return { uf, shapes, outers, owner, outerAt, anchors, fixedAxis, fixedPoint, fixedLine };
   }
 
   // 方向 axis で v と同じまとまりの点をまとめて delta 動かす
@@ -78,21 +132,24 @@ const Geo = (() => {
   }
 
   // 寸法の値に合わせて、動かす側をまるごと動かす。
-  // 動かす側: 原点とつながっていない側（両方つながっていないときは prefer の側）。
+  // 動かす側: 原点の基準とつながっていない側（両方つながっていないときは prefer の側）。
   // 動かす範囲: 動かす端と、関係（線・寸法）でつながった点に加え、その先に「つながっている線」も
-  // 長さを保ったまま一緒に動かす。ただし、動かさない側や原点のまとまりに届く線は伸び縮みさせる。
+  // 長さを保ったまま一緒に動かす。ただし、動かさない側や原点の基準のまとまりに届く線は伸び縮みさせる。
   // uf は、この寸法を入れる前の関係で作ったもの。
+  function anchorRoots(doc, uf, axis) {
+    const { outers } = outerFrames(doc, classifyShapes(closedShapes(doc)));
+    return new Set(outers.map((o) => uf.find(o.ref[axis])));
+  }
   function applyValue(doc, uf, axis, a, b, value, prefer) {
-    const o = doc.originId;
-    const aFixed = o != null && uf.same(a, o);
-    const bFixed = o != null && uf.same(b, o);
+    const anchors = anchorRoots(doc, uf, axis);
+    const aFixed = anchors.has(uf.find(a));
+    const bFixed = anchors.has(uf.find(b));
     const pa = pointById(doc, a)[axis], pb = pointById(doc, b)[axis];
     const delta = pa + value - pb;  // b を動かす量
     const moveA = bFixed || (!aFixed && prefer === 'a');
     const [mover, keep, d] = moveA ? [a, b, -delta] : [b, a, delta];
     if (Math.abs(d) < EPS) return;
-    const forbid = new Set([uf.find(keep)]);
-    if (o != null) forbid.add(uf.find(o));
+    const forbid = new Set([uf.find(keep), ...anchors]);
     // まとまり（root）単位で、方向 axis に沿う線をたどる
     const along = doc.lines.filter((l) => (axis === 'x' ? l.dir === 'h' : l.dir === 'v'));
     const moving = new Set([uf.find(mover)]);
@@ -138,17 +195,30 @@ const Geo = (() => {
     return null;
   }
 
-  // 点を (dx, dy) 動かす。確定している方向には動かない。ids の点のまとまりをまとめて動かす。
+  // 点を (dx, dy) 動かす。ids の点のまとまりをまとめて動かす。
+  // X・Y とも原点の基準とつながった点（外形の左上の角など）をつかんだときは、
+  // その外形（穴・切り欠き・つながった線を含む）をまるごと動かす。片方だけ基準とつながった方向には動かない。
   function moveGroups(doc, ids, dx, dy) {
+    const info = analyze(doc);
+    const whole = new Set();
+    for (const id of ids) {
+      const k = info.owner.get(id);
+      if (k == null) continue;
+      if (AXES.every((axis) => info.anchors[axis].has(info.uf[axis].find(id)))) whole.add(k);
+    }
+    const moved = new Set();
+    for (const p of doc.points) {
+      if (whole.has(info.owner.get(p.id))) { p.x = r3(p.x + dx); p.y = r3(p.y + dy); moved.add(p.id); }
+    }
     for (const axis of AXES) {
       const delta = axis === 'x' ? dx : dy;
-      const uf = build(doc, axis);
+      const uf = info.uf[axis];
       const done = new Set();
       for (const id of ids) {
+        if (moved.has(id)) continue;
         const root = uf.find(id);
-        if (done.has(root)) continue;
+        if (done.has(root) || info.anchors[axis].has(root)) continue;
         done.add(root);
-        if (doc.originId != null && uf.same(id, doc.originId) && id !== doc.originId) continue;
         shiftGroup(doc, uf, axis, id, delta);
       }
     }
@@ -204,11 +274,11 @@ const Geo = (() => {
   }
 
   // ---- 要素の削除 ----
-  // 線を消し、使われなくなった点（原点は残す）と、それらを参照する寸法を消す
+  // 線を消し、使われなくなった点と、それらを参照する寸法を消す
   function deleteLines(doc, lineIds) {
     const del = new Set(lineIds);
     doc.lines = doc.lines.filter((l) => !del.has(l.id));
-    const used = new Set([doc.originId]);
+    const used = new Set();
     for (const l of doc.lines) { used.add(l.a); used.add(l.b); }
     const gone = new Set(doc.points.filter((p) => !used.has(p.id)).map((p) => p.id));
     doc.points = doc.points.filter((p) => used.has(p.id));

@@ -1,9 +1,9 @@
 'use strict';
 
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
-// 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示はワーク原点からの値にする。
+// 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.6.0';
+const APP_VERSION = '0.7.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -27,12 +27,11 @@ function emptyTool() { return { shape: 'none', w: null, h: null, d: null, note: 
 // dims: [{id, axis:'x'|'y', a, b, value, kind, refs:[{t:'point'|'line', id}]}]（b − a = value）
 function newDoc() {
   return {
-    version: 3,
+    version: 4,
     name: '',
     program: null,  // プログラム番号
     tools: Array.from({ length: TOOL_COUNT }, emptyTool),
     sheet: { w: 1000, h: 500 },
-    originId: null,  // ワーク原点の点
     points: [],
     lines: [],
     dims: [],
@@ -67,7 +66,7 @@ let doc = newDoc();
 let sel = [];  // 選んだ要素 [{t:'point'|'line'|'dim', id}]（2 つまで）
 let dirty = false;
 let info = Geo.analyze(doc);  // 確定しているか（図形を変えるたびに作り直す）
-let shapes = [];  // 閉じた図形 [{poly, area, role:'outer'|'hole'|'notch', parent}]
+let shapes = [];  // 閉じた図形 [{poly, area, role:'outer'|'hole'|'notch', parent, outer}]（info.shapes と同じ）
 const undoStack = [];
 
 function newId() { return doc.nextId++; }
@@ -88,7 +87,7 @@ function changed() {
 }
 function refresh() {
   info = Geo.analyze(doc);
-  shapes = Geo.classifyShapes(Geo.closedShapes(doc));
+  shapes = info.shapes;
   updateUi();
   draw();
 }
@@ -100,10 +99,11 @@ function round(v) { return Math.round(v * 1000) / 1000; }
 const P = (id) => Geo.pointById(doc, id);
 const L = (id) => Geo.lineById(doc, id);
 const D = (id) => doc.dims.find((d) => d.id === id);
-const origin = () => (doc.originId != null ? P(doc.originId) : null);
-// 原点からの座標
-function relX(x) { const o = origin(); return round(x - (o ? o.x : 0)); }
-function relY(y) { const o = origin(); return round(y - (o ? o.y : 0)); }
+// ワーク原点は外形ごとに、外形を囲む四角の左上。座標は原点から右へ X+、下へ Y+ で表す。
+// どの外形にも属さないものは、板の左上から測る。
+const sheetTopLeft = () => ({ x: 0, y: doc.sheet.h });
+function originAt(x, y) { const k = info.outerAt(x, y); return k == null ? sheetTopLeft() : info.outers[k].origin; }
+function rel(o, x, y) { return { x: round(x - o.x), y: round(o.y - y) }; }
 function elemExists(s) { return s.t === 'point' ? !!P(s.id) : s.t === 'line' ? !!L(s.id) : !!D(s.id); }
 function dropMissingSelection() { sel = sel.filter(elemExists); }
 function isSel(t, id) { return sel.some((s) => s.t === t && s.id === id); }
@@ -148,11 +148,10 @@ function resize() {
   }
 }
 
-// ---- グリッドに合わせる（原点があれば原点を基準にする） ----
+// ---- グリッドに合わせる（板の左上を基準にする。外形の原点もグリッドの上に乗る） ----
 function snapStep() { return parseFloat($('snap').value); }
 function snapAxis(v, axis) {
-  const o = origin();
-  const base = o ? o[axis] : 0;
+  const base = sheetTopLeft()[axis];
   const s = snapStep();
   return round(base + Math.round((v - base) / s) * s);
 }
@@ -185,9 +184,8 @@ function draw() {
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(x0, y0, sw, sh);
 
-  // グリッド（原点を基準にする）
-  const o = origin();
-  const bx = o ? o.x : 0, by = o ? o.y : 0;
+  // グリッド（板の左上を基準にする）
+  const bx = 0, by = h;
   const step = gridStep();
   const major = step * 10;
   ctx.lineWidth = 1;
@@ -215,8 +213,8 @@ function draw() {
   dimHits = [];
   layoutDims().forEach((lv, i) => drawDim(doc.dims[i], lv));
   for (const l of doc.lines) drawLine(l);
-  for (const p of doc.points) if (p.id !== doc.originId) drawPoint(p);
-  if (o) drawOrigin(o);
+  for (const p of doc.points) drawPoint(p);
+  info.outers.forEach((fr, k) => drawOrigin(fr.origin, k));
   if (drag && drag.kind === 'stroke') drawStroke();
 }
 
@@ -273,19 +271,20 @@ function drawPoint(p) {
   ctx.stroke();
 }
 
-function drawOrigin(o) {
+// 外形の原点（外形を囲む四角の左上）。名前は印の右上（外形の上の辺の外側）に書く。
+function drawOrigin(o, k) {
   const [x, y] = toScreen(o.x, o.y);
-  const s = isSel('point', o.id);
-  ctx.strokeStyle = s ? COLOR.selected : COLOR.origin;
-  ctx.fillStyle = s ? COLOR.selected : COLOR.origin;
+  ctx.strokeStyle = COLOR.origin;
+  ctx.fillStyle = COLOR.origin;
   ctx.lineWidth = 2;
   ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(x - 14, y); ctx.lineTo(x + 14, y); ctx.moveTo(x, y - 14); ctx.lineTo(x, y + 14); ctx.stroke();
   ctx.font = 'bold 13px sans-serif';
-  ctx.textAlign = 'right';
-  ctx.fillText('原点', x - 12, y + 22);
   ctx.textAlign = 'left';
+  ctx.fillText(`S${k + 1} 原点`, x + 12, y - 10);
 }
+// 原点からの寸法の表示の値（Y は下へ正）
+function dimShown(d) { return d.kind === 'o' ? (d.axis === 'y' ? -d.value : d.value) : Math.abs(d.value); }
 
 // 寸法線を置く位置（寸法線と直角な方向の座標、mm）を決める。
 // 線の長さは、その線のすぐ外側（つながった線と反対の側）。
@@ -348,7 +347,7 @@ function drawDim(d, level) {
   ctx.beginPath(); ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke();
   for (const [p, q] of [[s1, s2], [s2, s1]]) arrow(p, q);
   // 数字
-  const text = d.kind === 'o' ? `${round(d.value)}` : `${round(Math.abs(d.value))}`;
+  const text = `${round(dimShown(d))}`;
   ctx.font = 'bold 13px sans-serif';
   const tw = ctx.measureText(text).width + 10, th = 20;
   const cx = (s1[0] + s2[0]) / 2, cy = (s1[1] + s2[1]) / 2;
@@ -518,7 +517,7 @@ function hitTest(sx, sy) {
 
 // ---- タッチ・マウス操作 ----
 // 指1本: なぞって描く／選ぶ・動かす。指2本: 拡大縮小と移動。
-let mode = 'origin';
+let mode = 'draw';
 const pointers = new Map();
 let drag = null;  // {kind:'stroke'|'press'|'move'|'pinch', ...}
 
@@ -552,16 +551,7 @@ canvas.addEventListener('pointerdown', (e) => {
   const [sx, sy] = eventPos(e);
   const [wx, wy] = toWorld(sx, sy);
 
-  if (mode === 'origin') {
-    placeOrigin(wx, wy);
-    drag = null;
-  } else if (mode === 'draw') {
-    if (!origin()) {
-      setMode('origin');
-      flash('先にワーク原点を置いてください');
-      drag = null;
-      return;
-    }
+  if (mode === 'draw') {
     drag = { kind: 'stroke', raw: [{ x: wx, y: wy }] };
   } else {
     drag = { kind: 'press', hit: hitTest(sx, sy), start: [sx, sy], world: [wx, wy] };
@@ -571,7 +561,12 @@ canvas.addEventListener('pointerdown', (e) => {
 canvas.addEventListener('pointermove', (e) => {
   const pos = eventPos(e);
   const [wx, wy] = toWorld(pos[0], pos[1]);
-  $('st-pos').textContent = origin() ? `X ${relX(snapAxis(wx, 'x'))}  Y ${relY(snapAxis(wy, 'y'))}` : '';
+  {
+    const sx = snapAxis(wx, 'x'), sy = snapAxis(wy, 'y');
+    const k = info.outerAt(sx, sy);
+    const r = rel(originAt(sx, sy), sx, sy);
+    $('st-pos').textContent = `${k == null ? '板' : `S${k + 1}`}  X ${r.x}  Y ${r.y}`;
+  }
   if (!pointers.has(e.pointerId)) return;
   pointers.set(e.pointerId, pos);
   if (!drag) return;
@@ -661,25 +656,6 @@ canvas.addEventListener('wheel', (e) => {
 // iOS Safari のジェスチャー（ページ全体の拡大）を止める
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 
-// ---- ワーク原点 ----
-// 初めて置くときは点を作る。動かすときは、原点とつながった（確定した）図形も一緒に動く。
-function placeOrigin(wx, wy) {
-  const s = snapStep();
-  const x = round(Math.round(wx / s) * s), y = round(Math.round(wy / s) * s);
-  snapshot();
-  const o = origin();
-  if (!o) {
-    const id = newId();
-    doc.points.push({ id, x, y });
-    doc.originId = id;
-  } else {
-    Geo.moveGroups(doc, [o.id], round(x - o.x), round(y - o.y));
-  }
-  setMode('draw');
-  changed();
-  flash('原点を置きました。原点から線をなぞると、確定した線になります');
-}
-
 // ---- 画面の部品 ----
 function setMode(m) {
   mode = m;
@@ -689,65 +665,69 @@ function setMode(m) {
 document.querySelectorAll('button.mode').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
 
 // ---- 寸法を入れる欄 ----
-const pName = (id) => (id === doc.originId ? '原点' : `P${id}`);
+const pName = (id) => `P${id}`;
 const lName = (id) => `L${id}`;
 const dirName = (l) => (l.dir === 'h' ? '水平' : '垂直');
 const axisName = (a) => (a === 'x' ? 'X' : 'Y');
 function refName(r) { return r.t === 'point' ? pName(r.id) : lName(r.id); }
 // 要素の、方向 axis での代表の点（線は端の点。線の向きと直角な方向では両端が同じ値）
 function repPoint(r) { return r.t === 'point' ? r.id : L(r.id).a; }
-function dimKey(axis, refs) { return axis + ':' + refs.map((r) => r.t + r.id).sort().join(','); }
-function findDim(axis, refs) { const k = dimKey(axis, refs); return doc.dims.find((d) => dimKey(d.axis, d.refs) === k); }
+// 原点からの寸法は、基準の点が変わっても同じ寸法として見る
+function dimKey(axis, refs, kind) {
+  return kind === 'o' ? `${axis}:o:${refs[1].t}${refs[1].id}` : axis + ':' + refs.map((r) => r.t + r.id).sort().join(',');
+}
+function findDim(axis, refs, kind) { const k = dimKey(axis, refs, kind); return doc.dims.find((d) => dimKey(d.axis, d.refs, d.kind) === k); }
 
 // 選んだものから、入れられる寸法を作る
-// 戻り値 {title, rows:[{label, axis, a, b, kind, refs, prefer, signed}], note?}
+// 戻り値 {title, rows:[{label, axis, a, b, kind, refs, prefer, signed, neg}], note?}
+// signed: 向きのある値（原点からの距離）。neg: 表示の値が b − a の逆（原点からの Y は下へ正）
 function dimOptions() {
-  const o = doc.originId;
-  const oRef = { t: 'point', id: o };
   const fixedTxt = (ok) => (ok ? '確定' : '未確定');
+  // 外形の原点からの寸法の欄。原点の基準の点（いちばん左・いちばん上の点）からの距離にする
+  const originRow = (pid, axis, elem) => {
+    const k = info.owner.get(pid);
+    if (k == null) return [];
+    const ref = info.outers[k].ref[axis];
+    return [{
+      label: `S${k + 1} 原点から ${axisName(axis)}`, axis, a: ref, b: pid, kind: 'o',
+      refs: [{ t: 'point', id: ref }, elem], prefer: 'b', signed: true, neg: axis === 'y',
+    }];
+  };
+  // 線の長さは左・上の端を残す
+  const lenPrefer = (axis, a, b) => (axis === 'x' ? (P(a).x <= P(b).x ? 'b' : 'a') : (P(a).y >= P(b).y ? 'b' : 'a'));
   if (sel.length === 1) {
     const s = sel[0];
     if (s.t === 'line') {
       const l = L(s.id);
       const along = l.dir === 'h' ? 'x' : 'y', across = l.dir === 'h' ? 'y' : 'x';
-      const a = P(l.a), b = P(l.b);
-      // 長さ: どちらも未確定なら左・下の端を残す
-      const rows = [{ label: '長さ', axis: along, a: l.a, b: l.b, kind: 'len', refs: [s], prefer: a[along] <= b[along] ? 'b' : 'a' }];
-      if (o != null) rows.push({ label: `原点から ${axisName(across)}`, axis: across, a: o, b: l.a, kind: 'o', refs: [oRef, s], prefer: 'b', signed: true });
-      return { title: `線 ${lName(l.id)}（${dirName(l)}・${fixedTxt(info.fixedLine(l))}）`, rows };
+      const rows = [{ label: '長さ', axis: along, a: l.a, b: l.b, kind: 'len', refs: [s], prefer: lenPrefer(along, l.a, l.b) }];
+      rows.push(...originRow(l.a, across, s));
+      return { title: `線 ${lName(l.id)}（${dirName(l)}・${fixedTxt(info.fixedLine(l))}）`, rows,
+        note: info.owner.get(l.a) == null ? '閉じた図形に入っていないので、原点からの距離は決められません。' : null };
     }
     if (s.t === 'point') {
-      if (s.id === o) return { title: '原点', rows: [], note: '「原点」ボタンで、置き直せます。' };
-      return {
-        title: `点 ${pName(s.id)}（${fixedTxt(info.fixedPoint(s.id))}）`,
-        rows: o == null ? [] : [
-          { label: '原点から X', axis: 'x', a: o, b: s.id, kind: 'o', refs: [oRef, s], prefer: 'b', signed: true },
-          { label: '原点から Y', axis: 'y', a: o, b: s.id, kind: 'o', refs: [oRef, s], prefer: 'b', signed: true },
-        ],
-      };
+      const rows = [...originRow(s.id, 'x', s), ...originRow(s.id, 'y', s)];
+      return { title: `点 ${pName(s.id)}（${fixedTxt(info.fixedPoint(s.id))}）`, rows,
+        note: rows.length ? null : '閉じた図形に入っていないので、原点からの距離は決められません。' };
     }
     if (s.t === 'dim') {
       const d = D(s.id);
-      const names = d.refs.map(refName).join(' と ');
+      const names = d.kind === 'o' ? `原点と ${refName(d.refs[1])}` : d.refs.map(refName).join(' と ');
       return {
         title: `寸法 D${d.id}`,
         rows: [{
-          label: `${names} の ${axisName(d.axis)}`, axis: d.axis, a: d.a, b: d.b, kind: d.kind, refs: d.refs, signed: d.kind === 'o',
-          // 線の長さは左・下の端を残す
-          prefer: d.kind === 'len' && P(d.a)[d.axis] > P(d.b)[d.axis] ? 'a' : 'b',
+          label: `${names} の ${axisName(d.axis)}`, axis: d.axis, a: d.a, b: d.b, kind: d.kind, refs: d.refs,
+          signed: d.kind === 'o', neg: d.kind === 'o' && d.axis === 'y',
+          prefer: d.kind === 'len' ? lenPrefer(d.axis, d.a, d.b) : 'b',
         }],
         isDim: true,
       };
     }
   }
   if (sel.length === 2) {
-    const [s1, s2] = sel;
-    const withOrigin = (s1.t === 'point' && s1.id === o) || (s2.t === 'point' && s2.id === o);
-    const kind = withOrigin ? 'o' : null;
-    // 原点を含むときは原点を a にする（符号付きの座標になる）
-    const [f, g] = s2.t === 'point' && s2.id === o ? [s2, s1] : [s1, s2];
+    const [f, g] = sel;
     const prefer = 'b';  // 2 つ目に選んだ側が動く
-    const signed = withOrigin;
+    const kind = null, signed = false;
     if (f.t === 'point' && g.t === 'point') {
       return {
         title: `点 ${pName(f.id)} と 点 ${pName(g.id)}`,
@@ -817,8 +797,8 @@ function updateProps() {
   opt.rows.forEach((r, i) => {
     const input = box.querySelector(`input[data-i="${i}"]`);
     const cur = P(r.b)[r.axis] - P(r.a)[r.axis];
-    const existing = findDim(r.axis, r.refs);
-    if (document.activeElement !== input) input.value = round(r.signed ? cur : Math.abs(cur));
+    const existing = findDim(r.axis, r.refs, r.kind);
+    if (document.activeElement !== input) input.value = round(r.signed ? (r.neg ? -cur : cur) : Math.abs(cur));
     const badge = input.parentElement.querySelector('.badge');
     badge.textContent = existing ? '寸法' : '';
   });
@@ -835,9 +815,9 @@ function commitDim(i, input) {
   if (!r.signed && v < 0) v = -v;
   if (r.kind === 'len' && v <= 0) { flash('長さは 0 より大きくしてください'); updateUi(); return; }
   const cur = P(r.b)[r.axis] - P(r.a)[r.axis];
-  const existing = findDim(r.axis, r.refs);
-  // 向き（どちら側か）はいまの位置のまま
-  const sign = r.signed ? 1 : (existing ? Math.sign(existing.value) || 1 : Math.sign(cur) || 1);
+  const existing = findDim(r.axis, r.refs, r.kind);
+  // 向き（どちら側か）はいまの位置のまま。原点からの寸法は入れた符号のまま（Y は下へ正）
+  const sign = r.signed ? (r.neg ? -1 : 1) : (existing ? Math.sign(existing.value) || 1 : Math.sign(cur) || 1);
   const value = round(sign * v);
   snapshot();
   // 寸法の a・b が欄の a・b と逆向きなら、動かす側も入れ替える
@@ -861,7 +841,7 @@ function deleteSelected() {
   snapshot();
   const lineIds = new Set(sel.filter((s) => s.t === 'line').map((s) => s.id));
   for (const s of sel) {
-    if (s.t === 'point' && s.id !== doc.originId) {
+    if (s.t === 'point') {
       for (const l of doc.lines) if (l.a === s.id || l.b === s.id) lineIds.add(l.id);
     }
   }
@@ -874,7 +854,7 @@ function deleteSelected() {
 
 function updateUi() {
   dropMissingSelection();
-  $('btn-delete').disabled = !sel.some((s) => s.t !== 'point' || s.id !== doc.originId);
+  $('btn-delete').disabled = !sel.length;
   $('btn-undo').disabled = !undoStack.length;
   $('sheet-w').value = doc.sheet.w;
   $('sheet-h').value = doc.sheet.h;
@@ -901,40 +881,54 @@ function genCode() {
   add(programText(doc.program), null);
   doc.tools.forEach((t, i) => add(`; T${i + 1} ${toolText(t)}`, null, true));
   add('', null);
-  if (!origin()) { add('; ワーク原点がありません', null, true); return lines; }
-  add('; 点（原点からの座標）  ● 確定', null, true);
-  for (const p of doc.points) {
-    if (p.id === doc.originId) continue;
-    const mark = info.fixedPoint(p.id) ? '●' : '○';
-    add(`${pName(p.id).padEnd(5)}${mark} X${fmt(relX(p.x)).padEnd(8)}Y${fmt(relY(p.y))}`, `point:${p.id}`);
-  }
-  add('', null);
-  add('; 線', null, true);
-  for (const l of doc.lines) {
-    const a = P(l.a), b = P(l.b);
-    const len = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
-    const mark = info.fixedLine(l) ? '●' : '○';
-    add(`${lName(l.id).padEnd(5)}${mark} ${dirName(l)} ${pName(l.a)}-${pName(l.b)}  長さ ${fmt(len)}`, `line:${l.id}`);
-  }
-  if (!doc.lines.length) add('; 線がありません', null, true);
-  if (shapes.length) {
+  // 外形ごとに、原点からの座標で並べる（Y は下へ正）。外形に入らないものは最後に板の左上から。
+  const roleName = { hole: '穴', notch: '切り欠き' };
+  const groups = info.outers.map((fr, k) => ({ k, origin: fr.origin }));
+  groups.push({ k: null, origin: sheetTopLeft() });
+  const ownerOf = (pid) => { const k = info.owner.get(pid); return k == null ? null : k; };
+  const span = (o, poly) => {
+    const a = rel(o, Math.min(...poly.map((v) => v.x)), Math.max(...poly.map((v) => v.y)));
+    const b = rel(o, Math.max(...poly.map((v) => v.x)), Math.min(...poly.map((v) => v.y)));
+    return `X${fmt(a.x)}〜${fmt(b.x)} Y${fmt(a.y)}〜${fmt(b.y)}`;
+  };
+  if (!info.outers.length) add('; 閉じた図形がありません（原点は閉じた図形の左上に付きます）', null, true);
+  for (const g of groups) {
+    const pts = doc.points.filter((p) => ownerOf(p.id) === g.k);
+    const lns = doc.lines.filter((l) => ownerOf(l.a) === g.k);
+    if (g.k == null && !pts.length) continue;
     add('', null);
-    add('; 閉じた図形', null, true);
-    const roleName = { outer: '外形', hole: '穴', notch: '切り欠き' };
-    const outerNo = new Map();
-    shapes.forEach((s, i) => { if (s.role === 'outer') outerNo.set(i, outerNo.size + 1); });
-    shapes.forEach((s, i) => {
-      const xs = s.poly.map((v) => v.x), ys = s.poly.map((v) => v.y);
-      const of = s.role === 'outer' ? `S${outerNo.get(i)}` : `S${outerNo.get(s.parent)} の${roleName[s.role]}`;
-      add(`${of}  ${s.poly.length}角 X${fmt(relX(Math.min(...xs)))}〜${fmt(relX(Math.max(...xs)))} Y${fmt(relY(Math.min(...ys)))}〜${fmt(relY(Math.max(...ys)))}`, null);
-    });
+    if (g.k != null) {
+      const sh = shapes[info.outers[g.k].shape];
+      const tl = rel(sheetTopLeft(), g.origin.x, g.origin.y);
+      add(`; S${g.k + 1} 外形 ${sh.poly.length}角  原点は板の左上から X${fmt(tl.x)} Y${fmt(tl.y)}`, null, true);
+      add(`S${g.k + 1}  外形   ${span(g.origin, sh.poly)}`, null);
+      for (const c of shapes) if (c.role !== 'outer' && c.outer === g.k) add(`S${g.k + 1}  ${roleName[c.role].padEnd(4, '　')} ${span(g.origin, c.poly)}`, null);
+    } else {
+      add('; 閉じた図形の外（板の左上から）', null, true);
+    }
+    add('; 点  ● 確定', null, true);
+    for (const p of pts) {
+      const mark = info.fixedPoint(p.id) ? '●' : '○';
+      const r = rel(g.origin, p.x, p.y);
+      add(`${pName(p.id).padEnd(5)}${mark} X${fmt(r.x).padEnd(8)}Y${fmt(r.y)}`, `point:${p.id}`);
+    }
+    add('; 線', null, true);
+    for (const l of lns) {
+      const a = P(l.a), b = P(l.b);
+      const len = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+      const mark = info.fixedLine(l) ? '●' : '○';
+      add(`${lName(l.id).padEnd(5)}${mark} ${dirName(l)} ${pName(l.a)}-${pName(l.b)}  長さ ${fmt(len)}`, `line:${l.id}`);
+    }
   }
   if (doc.dims.length) {
     add('', null);
     add('; 寸法', null, true);
     for (const d of doc.dims) {
-      const v = d.kind === 'o' ? d.value : Math.abs(d.value);
-      const what = d.kind === 'len' ? `${refName(d.refs[0])} の長さ` : `${d.refs.map(refName).join('-')} ${axisName(d.axis)}`;
+      const v = dimShown(d);
+      const k = info.owner.get(d.b);
+      const what = d.kind === 'len' ? `${refName(d.refs[0])} の長さ`
+        : d.kind === 'o' ? `${k == null ? '' : `S${k + 1} `}原点-${refName(d.refs[1])} ${axisName(d.axis)}`
+        : `${d.refs.map(refName).join('-')} ${axisName(d.axis)}`;
       add(`D${String(d.id).padEnd(4)}${what}  ${fmt(v)}`, `dim:${d.id}`);
     }
   }
@@ -1055,28 +1049,38 @@ function loadDoc(d) {
     .filter((l) => ids.has(l.a) && ids.has(l.b) && l.a !== l.b);
   const lineIds = new Set(lines.map((l) => l.id));
   const refOk = (r) => r && (r.t === 'point' ? ids.has(r.id) : r.t === 'line' && lineIds.has(r.id));
-  const dims = (Array.isArray(d.dims) ? d.dims : [])
+  let dims = (Array.isArray(d.dims) ? d.dims : [])
     .map((q) => ({
       id: Number(q.id), axis: q.axis === 'y' ? 'y' : 'x', a: Number(q.a), b: Number(q.b), value: num(q.value),
       kind: String(q.kind || 'pp'), refs: (q.refs || []).map((r) => ({ t: r.t, id: Number(r.id) })),
     }))
     .filter((q) => ids.has(q.a) && ids.has(q.b) && Number.isFinite(q.value) && q.refs.length && q.refs.every(refOk));
-  const originId = ids.has(Number(d.originId)) ? Number(d.originId) : null;
+  // v0.6 までの図面のワーク原点（図面に 1 つ）は、線がつながっていればふつうの点として残し、
+  // つながっていなければ消す。原点からの寸法は、点と点の寸法にする。
+  const oldOrigin = Number(d.originId);
+  if (ids.has(oldOrigin)) {
+    if (!lines.some((l) => l.a === oldOrigin || l.b === oldOrigin)) {
+      points.splice(points.findIndex((p) => p.id === oldOrigin), 1);
+      ids.delete(oldOrigin);
+      dims = dims.filter((q) => q.a !== oldOrigin && q.b !== oldOrigin && !q.refs.some((r) => r.t === 'point' && r.id === oldOrigin));
+    }
+    for (const q of dims) if (q.kind === 'o') q.kind = 'pp';
+  }
   const maxId = Math.max(0, ...points.map((p) => p.id), ...lines.map((l) => l.id), ...dims.map((q) => q.id));
   doc = {
-    version: 3,
+    version: 4,
     name: String(d.name || ''),
     program: Number.isInteger(prog) && prog >= PROGRAM_MIN && prog <= PROGRAM_MAX ? prog : null,
     tools: normalizeTools(d.tools),
     sheet: { w: Number(d.sheet.w) || 1000, h: Number(d.sheet.h) || 500 },
-    originId, points, lines, dims,
+    points, lines, dims,
     nextId: Math.max(Number(d.nextId) || 1, maxId + 1),
   };
   sel = [];
   undoStack.length = 0;
   dirty = false;
   saveCurrent();
-  setMode(originId == null ? 'origin' : 'draw');
+  setMode('draw');
   refresh();
   fitView();
 }
@@ -1314,7 +1318,7 @@ window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault()
     const cur = JSON.parse(localStorage.getItem(CURRENT_KEY));
     if (cur && cur.doc) { resize(); loadDoc(cur.doc); dirty = !!cur.dirty; saveCurrent(); updateUi(); return; }
   } catch (e) { /* 壊れていたら新しく始める */ }
-  setMode('origin');
+  setMode('draw');
   refresh();
   resize();
   openProjectDialog('new');  // 初めて開いたときは、プログラム番号と金型から決める
