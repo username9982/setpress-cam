@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.14.2';
+const APP_VERSION = '0.14.3';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1363,8 +1363,8 @@ function drawLayout() {
   }
 }
 
-// ---- 図形データの区画 ----
-// いまは図形の確認用に、点・線・寸法を原点からの座標で並べる（プログラムの自動作成は次の段階）。
+// ---- コードの区画 ----
+// 機械に手で打ち込むデータ（プログラム番号・割付の F3）とコメントだけを並べる。
 function fmt(v) {
   return String(round(v));
 }
@@ -1398,59 +1398,10 @@ function genCode() {
     });
     if (!lay.hits.length) add('; 穴がありません', null, true);
   }
-  add('', null);
-  // 外形ごとに、原点からの座標で並べる（Y は下へ正）。外形に入らないものは最後に板の左上から。
-  const roleName = { hole: '穴', notch: '切り欠き' };
-  const groups = info.outers.map((fr, k) => ({ k, origin: fr.origin }));
-  groups.push({ k: null, origin: sheetTopLeft() });
-  const ownerOf = (pid) => { const k = info.owner.get(pid); return k == null ? null : k; };
-  const span = (o, poly) => {
-    const a = rel(o, Math.min(...poly.map((v) => v.x)), Math.max(...poly.map((v) => v.y)));
-    const b = rel(o, Math.max(...poly.map((v) => v.x)), Math.min(...poly.map((v) => v.y)));
-    return `X${fmt(a.x)}〜${fmt(b.x)} Y${fmt(a.y)}〜${fmt(b.y)}`;
-  };
-  if (!info.outers.length) add('; 閉じた図形がありません（原点は閉じた図形の左上に付きます）', null, true);
-  for (const g of groups) {
-    const pts = doc.points.filter((p) => ownerOf(p.id) === g.k);
-    const lns = doc.lines.filter((l) => ownerOf(l.a) === g.k);
-    if (g.k == null && !pts.length) continue;
+  // 機械に入力するデータとコメントだけを出す（図形の点・線・寸法の一覧は出さない）
+  if (!doc.layouts.some((q) => info.owner.get(q.work) != null)) {
     add('', null);
-    if (g.k != null) {
-      const sh = shapes[info.outers[g.k].shape];
-      const tl = rel(sheetTopLeft(), g.origin.x, g.origin.y);
-      const fixedTxt = ['x', 'y'].map((ax) => (sheetDimOf(g.k, ax) ? '●' : '○')).join('');
-      add(`; S${g.k + 1} 外形 ${sh.poly.length}角  原点は板原点から X${fmt(tl.x)} Y${fmt(tl.y)} ${fixedTxt}`, null, true);
-      add(`S${g.k + 1}  外形   ${span(g.origin, sh.poly)}`, null);
-      for (const c of shapes) if (c.role !== 'outer' && c.outer === g.k) add(`S${g.k + 1}  ${roleName[c.role].padEnd(4, '　')} ${span(g.origin, c.poly)}`, null);
-    } else {
-      add('; 閉じた図形の外（板の左上から）', null, true);
-    }
-    add('; 点  ● 確定', null, true);
-    for (const p of pts) {
-      const mark = info.fixedPoint(p.id) ? '●' : '○';
-      const r = rel(g.origin, p.x, p.y);
-      add(`${pName(p.id).padEnd(5)}${mark} X${fmt(r.x).padEnd(8)}Y${fmt(r.y)}`, `point:${p.id}`);
-    }
-    add('; 線', null, true);
-    for (const l of lns) {
-      const a = P(l.a), b = P(l.b);
-      const len = Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
-      const mark = info.fixedLine(l) ? '●' : '○';
-      add(`${lName(l.id).padEnd(5)}${mark} ${dirName(l)} ${pName(l.a)}-${pName(l.b)}  長さ ${fmt(len)}`, `line:${l.id}`);
-    }
-  }
-  if (doc.dims.length) {
-    add('', null);
-    add('; 寸法', null, true);
-    for (const d of doc.dims) {
-      const v = dimShown(d);
-      const k = info.owner.get(d.b);
-      const what = d.kind === 'len' ? `${refName(d.refs[0])} の長さ`
-        : d.kind === 'sheet' ? `板原点-${k == null ? '(閉じていない外形)' : `S${k + 1} 原点`} ${axisName(d.axis)}`
-        : d.kind === 'o' ? `${k == null ? '' : `S${k + 1} `}原点-${refName(d.refs[1])} ${axisName(d.axis)}`
-        : `${d.refs.map(refName).join('-')} ${axisName(d.axis)}`;
-      add(`D${String(d.id).padEnd(4)}${what}  ${fmt(v)}`, `dim:${d.id}`);
-    }
+    add('; まだ割り付けていません（「割付」→ 図形をタップ →「自動割付」）', null, true);
   }
   return lines;
 }
