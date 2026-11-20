@@ -515,11 +515,17 @@ const Geo = (() => {
   }
   // 長方形 box から、水平・垂直の辺だけの多角形 poly を除いた所を、つながった所ごとの多角形で返す
   // （L 字の外形を囲む四角の、欠けた角など）。頂点の X・Y で格子に切り、外形の外のマスをつなげて輪郭をたどる
-  function complementPieces(poly, box) {
-    const xs = [...new Set([box.x0, box.x1, ...poly.map((v) => r3(v.x))])].filter((x) => x >= box.x0 - EPS && x <= box.x1 + EPS).sort((p, q) => p - q);
-    const ys = [...new Set([box.y0, box.y1, ...poly.map((v) => r3(v.y))])].filter((y) => y >= box.y0 - EPS && y <= box.y1 + EPS).sort((p, q) => p - q);
+  function complementPieces(poly, box) { return cutPieces(poly, [], box); }
+  // 外形を囲む四角 box の中で抜く所（外形 poly の外か、抜く図形 cutters のどれかの中）を、つながった所ごとの
+  // 多角形で返す。重なったり接したりする穴・切り欠きは 1 つにまとめる（まとめてから長方形に分けるので、
+  // 継ぎ目の重ねがどの図形どうしの間にも効く）
+  function cutPieces(poly, cutters, box) {
+    const all = [poly, ...cutters];
+    const xs = [...new Set([box.x0, box.x1, ...all.flatMap((q) => q.map((v) => r3(v.x)))])].filter((x) => x >= box.x0 - EPS && x <= box.x1 + EPS).sort((p, q) => p - q);
+    const ys = [...new Set([box.y0, box.y1, ...all.flatMap((q) => q.map((v) => r3(v.y)))])].filter((y) => y >= box.y0 - EPS && y <= box.y1 + EPS).sort((p, q) => p - q);
     const nx = xs.length - 1, ny = ys.length - 1;
-    const out = (i, j) => i >= 0 && j >= 0 && i < nx && j < ny && inside(poly, (xs[i] + xs[i + 1]) / 2, (ys[j] + ys[j + 1]) / 2) < 0;
+    const cut = (cx, cy) => inside(poly, cx, cy) < 0 || cutters.some((q) => inside(q, cx, cy) > 0);
+    const out = (i, j) => i >= 0 && j >= 0 && i < nx && j < ny && cut((xs[i] + xs[i + 1]) / 2, (ys[j] + ys[j + 1]) / 2);
     const comp = new Map();
     let n = 0;
     for (let i = 0; i < nx; i++) {
@@ -569,7 +575,7 @@ const Geo = (() => {
   }
 
   return {
-    EPS, AXES, r3, rectGrow, rectPartitions, rectInside, clipToRect, complementPieces, pointById, lineById, analyze, build, addDim, setDimValue, moveItems,
+    EPS, AXES, r3, rectGrow, rectPartitions, rectInside, clipToRect, complementPieces, cutPieces, pointById, lineById, analyze, build, addDim, setDimValue, moveItems,
     strokeToPolyline, cleanPolyline, deleteLines, closedShapes, classifyShapes, inside, overlaps,
   };
 })();

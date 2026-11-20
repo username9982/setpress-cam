@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.17.4';
+const APP_VERSION = '0.17.5';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1354,8 +1354,15 @@ function autoLayout() {
   const holes = holesOf(k);
   const hits = [], warn = [];
   if (!doc.tools.some((t) => t.shape === 'rect' && t.w && t.h)) warn.push('長方形の金型がありません。「金型」で決めてください。');
-  holes.forEach((hole, i) => {
-    const { rects, open } = splitHole(hole.poly);
+  // 穴・切り欠き・L 字などで外形を囲む四角から欠けた所を、重なりや接する所ごと 1 つにまとめてから分ける。
+  // 四角の辺に届くものは切り欠き、届かないものは穴として抜く
+  const box = outerRect(k);
+  const E = 1e-6;
+  const pieces = Geo.cutPieces(shapes[info.outers[k].shape].poly, [...holes, ...notchesOf(k)].map((s) => s.poly), box);
+  const onBox = (poly) => poly.some((v) => Math.abs(v.x - box.x0) < E || Math.abs(v.x - box.x1) < E || Math.abs(v.y - box.y0) < E || Math.abs(v.y - box.y1) < E);
+  const holePieces = pieces.filter((p) => !onBox(p));
+  holePieces.forEach((hpoly, i) => {
+    const { rects, open } = splitHole(hpoly);
     if (open) warn.push(`穴 ${i + 1} の継ぎ目 ${open} か所は、抜かない所にぶつかるので重ねていません。`);
     for (const r of rects) {
       const w = round(r.x1 - r.x0), h = round(r.y1 - r.y0);
@@ -1370,16 +1377,13 @@ function autoLayout() {
   // 外形の辺の外へ広げて四角く抜き、あとから抜く F13 に金型寸法の約 1/3 かぶるようにする
   // （抜いた輪郭とこれから抜く輪郭がぴったり接すると金型に良くないため）。
   // L 字のような外形は、囲む四角から欠けた所も切り欠きとして抜く
-  const box = outerRect(k);
-  const gaps = Geo.complementPieces(shapes[info.outers[k].shape].poly, box);
-  const notches = [...notchesOf(k).map((s) => Geo.clipToRect(s.poly, box)), ...gaps];
+  const notches = pieces.filter((p) => onBox(p));
   const outlineTool = pickOutlineTool();
   if (notches.length) {
     const ot = outlineTool == null ? null : doc.tools[outlineTool];
     const step1 = (v) => Math.max(0.1, Math.round(v * 10) / 10);
     const ovx = ot ? step1(ot.w / 3) : 0, ovy = ot ? step1(ot.h / 3) : 0;
     const others = info.outers.filter((o, j) => j !== k).map((o) => shapes[o.shape].poly);
-    const E = 1e-6;
     const nh = [];
     notches.forEach((poly, i) => {
       // 外形を囲む四角の中の部分（実際に抜く所）を長方形に分け、四角の辺に乗っている側を外へ約 1/3 広げる。
