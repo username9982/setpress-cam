@@ -216,8 +216,130 @@ const Geo = (() => {
       !d.refs.some((r) => (r.t === 'line' && del.has(r.id)) || (r.t === 'point' && gone.has(r.id))));
   }
 
+  // ---- 閉じた図形 ----
+  // 線のつながりから、閉じた図形（ひと回りする線の列）を見つける。
+  // 先が行き止まりの線（ひげ）は取り除いて考える。1 つの点に 3 本以上の線が集まる所があるまとまりは扱わない。
+  // 戻り値: [{lineIds, pointIds, poly:[{x, y}], area}]
+  function closedShapes(doc) {
+    let lines = doc.lines.slice();
+    const degree = () => {
+      const deg = new Map();
+      for (const l of lines) { deg.set(l.a, (deg.get(l.a) || 0) + 1); deg.set(l.b, (deg.get(l.b) || 0) + 1); }
+      return deg;
+    };
+    // ひげを取り除く
+    for (;;) {
+      const deg = degree();
+      const next = lines.filter((l) => deg.get(l.a) > 1 && deg.get(l.b) > 1);
+      if (next.length === lines.length) break;
+      lines = next;
+    }
+    const deg = degree();
+    const byPoint = new Map();
+    for (const l of lines) {
+      for (const p of [l.a, l.b]) { if (!byPoint.has(p)) byPoint.set(p, []); byPoint.get(p).push(l); }
+    }
+    const used = new Set();
+    const shapes = [];
+    for (const start of lines) {
+      if (used.has(start.id)) continue;
+      // まとまりを集める
+      const comp = [];
+      const stack = [start];
+      const seen = new Set([start.id]);
+      while (stack.length) {
+        const l = stack.pop();
+        comp.push(l);
+        for (const p of [l.a, l.b]) for (const m of byPoint.get(p)) if (!seen.has(m.id)) { seen.add(m.id); stack.push(m); }
+      }
+      comp.forEach((l) => used.add(l.id));
+      if (comp.some((l) => deg.get(l.a) !== 2 || deg.get(l.b) !== 2)) continue;
+      // ひと回りたどる
+      const pointIds = [start.a];
+      const lineIds = [start.id];
+      let cur = start.b, prev = start;
+      while (cur !== start.a) {
+        pointIds.push(cur);
+        const nxt = byPoint.get(cur).find((m) => m.id !== prev.id);
+        lineIds.push(nxt.id);
+        cur = nxt.a === cur ? nxt.b : nxt.a;
+        prev = nxt;
+      }
+      const poly = pointIds.map((id) => { const p = pointById(doc, id); return { x: p.x, y: p.y }; });
+      const area = Math.abs(polyArea(poly));
+      if (area > EPS) shapes.push({ lineIds, pointIds, poly, area });
+    }
+    return shapes;
+  }
+
+  function polyArea(poly) {
+    let s = 0;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      s += a.x * b.y - b.x * a.y;
+    }
+    return s / 2;
+  }
+
+  // 点が多角形の中か: 1（中）、0（線の上）、−1（外）
+  function inside(poly, x, y) {
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const a = poly[i], b = poly[j];
+      // 辺の上
+      const onX = Math.min(a.x, b.x) - EPS <= x && x <= Math.max(a.x, b.x) + EPS;
+      const onY = Math.min(a.y, b.y) - EPS <= y && y <= Math.max(a.y, b.y) + EPS;
+      if (onX && onY && Math.abs((b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x)) < EPS) return 0;
+      if ((a.y > y) !== (b.y > y) && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) c = !c;
+    }
+    return c ? 1 : -1;
+  }
+
+  // 水平・垂直の辺が、互いの内側で交わるか
+  function edgesCross(p, q) {
+    const edges = (poly) => poly.map((a, i) => [a, poly[(i + 1) % poly.length]]);
+    for (const [a1, a2] of edges(p)) {
+      for (const [b1, b2] of edges(q)) {
+        const ah = Math.abs(a1.y - a2.y) < EPS, bh = Math.abs(b1.y - b2.y) < EPS;
+        if (ah === bh) continue;
+        const [h1, h2, v1, v2] = ah ? [a1, a2, b1, b2] : [b1, b2, a1, a2];
+        const x = v1.x, y = h1.y;
+        if (Math.min(h1.x, h2.x) + EPS < x && x < Math.max(h1.x, h2.x) - EPS &&
+            Math.min(v1.y, v2.y) + EPS < y && y < Math.max(v1.y, v2.y) - EPS) return true;
+      }
+    }
+    return false;
+  }
+
+  // 2 つの多角形が、面として重なるか（辺が触れているだけは重ならない）
+  function overlaps(p, q) {
+    if (edgesCross(p, q)) return true;
+    if (q.some((v) => inside(p, v.x, v.y) > 0) || p.some((v) => inside(q, v.x, v.y) > 0)) return true;
+    // 頂点がすべて相手の線の上にある場合（同じ形など）は、辺の中点で確かめる
+    const mids = (poly) => poly.map((a, i) => { const b = poly[(i + 1) % poly.length]; return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; });
+    return mids(q).some((v) => inside(p, v.x, v.y) > 0) || mids(p).some((v) => inside(q, v.x, v.y) > 0);
+  }
+
+  // 閉じた図形を、外形・穴・切り欠きに分ける。大きい順に見て、
+  // それまでの外形と重なるものは抜く側（外形の内側に収まれば穴、はみ出したり辺に触れたりすれば切り欠き）、
+  // 重ならないものは別の外形にする。shape.role と shape.parent（外形の番号）を付ける。
+  function classifyShapes(shapes) {
+    const order = shapes.map((s, i) => i).sort((i, j) => shapes[j].area - shapes[i].area);
+    const bases = [];
+    for (const i of order) {
+      const s = shapes[i];
+      const hit = bases.find((b) => overlaps(shapes[b].poly, s.poly));
+      if (hit == null) { s.role = 'outer'; s.parent = null; bases.push(i); continue; }
+      const base = shapes[hit].poly;
+      const allInside = s.poly.every((v) => inside(base, v.x, v.y) > 0) && !edgesCross(base, s.poly);
+      s.role = allInside ? 'hole' : 'notch';
+      s.parent = hit;
+    }
+    return shapes;
+  }
+
   return {
     EPS, AXES, r3, pointById, lineById, analyze, build, addDim, setDimValue, moveGroups,
-    strokeToPolyline, cleanPolyline, deleteLines,
+    strokeToPolyline, cleanPolyline, deleteLines, closedShapes, classifyShapes, inside, overlaps,
   };
 })();

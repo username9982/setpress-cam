@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示はワーク原点からの値にする。
 
-const APP_VERSION = '0.5.1';
+const APP_VERSION = '0.6.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -67,6 +67,7 @@ let doc = newDoc();
 let sel = [];  // 選んだ要素 [{t:'point'|'line'|'dim', id}]（2 つまで）
 let dirty = false;
 let info = Geo.analyze(doc);  // 確定しているか（図形を変えるたびに作り直す）
+let shapes = [];  // 閉じた図形 [{poly, area, role:'outer'|'hole'|'notch', parent}]
 const undoStack = [];
 
 function newId() { return doc.nextId++; }
@@ -87,6 +88,7 @@ function changed() {
 }
 function refresh() {
   info = Geo.analyze(doc);
+  shapes = Geo.classifyShapes(Geo.closedShapes(doc));
   updateUi();
   draw();
 }
@@ -163,6 +165,7 @@ const COLOR = {
   dim: '#7a4fb3',
   origin: '#c0392b',
   preview: '#8a96a3',
+  fill: 'rgba(47, 128, 209, 0.18)',  // 閉じた図形の内側
 };
 let dimHits = [];  // 寸法の数字の位置（タップ用）[{id, x, y, w, h}]
 
@@ -207,13 +210,46 @@ function draw() {
   ctx.textAlign = 'left';
   ctx.fillText(`板 ${w} × ${h} mm`, x0, y0 - 8);
 
-  // 寸法 → 線 → 点 → 原点 の順に重ねる
+  // 閉じた図形の塗り → 寸法 → 線 → 点 → 原点 の順に重ねる
+  drawFills();
   dimHits = [];
   layoutDims().forEach((lv, i) => drawDim(doc.dims[i], lv));
   for (const l of doc.lines) drawLine(l);
   for (const p of doc.points) if (p.id !== doc.originId) drawPoint(p);
   if (o) drawOrigin(o);
   if (drag && drag.kind === 'stroke') drawStroke();
+}
+
+// 閉じた図形の内側を半透明で塗る。外形を塗ってから、穴・切り欠きの形で抜く。
+// 抜く形が外形からはみ出していても、重なった所だけが抜ける。
+const fillLayer = document.createElement('canvas');
+const fillCtx = fillLayer.getContext('2d');
+function drawFills() {
+  if (!shapes.some((s) => s.role === 'outer')) return;
+  if (fillLayer.width !== canvas.width || fillLayer.height !== canvas.height) {
+    fillLayer.width = canvas.width;
+    fillLayer.height = canvas.height;
+  }
+  const f = fillCtx;
+  f.setTransform(1, 0, 0, 1, 0, 0);
+  f.clearRect(0, 0, fillLayer.width, fillLayer.height);
+  f.setTransform(ctx.getTransform());
+  const path = (s) => {
+    f.beginPath();
+    s.poly.forEach((v, i) => { const [x, y] = toScreen(v.x, v.y); i ? f.lineTo(x, y) : f.moveTo(x, y); });
+    f.closePath();
+  };
+  f.globalCompositeOperation = 'source-over';
+  f.fillStyle = COLOR.fill;
+  for (const s of shapes) if (s.role === 'outer') { path(s); f.fill(); }
+  f.globalCompositeOperation = 'destination-out';
+  f.fillStyle = '#000';
+  for (const s of shapes) if (s.role !== 'outer') { path(s); f.fill(); }
+  f.globalCompositeOperation = 'source-over';
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(fillLayer, 0, 0);
+  ctx.restore();
 }
 
 function drawLine(l) {
@@ -815,6 +851,7 @@ function commitDim(i, input) {
     updateUi();
     return;
   }
+  sel = [];  // 決まったら選択を解く（続けて次の要素を選べるように）
   changed();
 }
 
@@ -880,6 +917,18 @@ function genCode() {
     add(`${lName(l.id).padEnd(5)}${mark} ${dirName(l)} ${pName(l.a)}-${pName(l.b)}  長さ ${fmt(len)}`, `line:${l.id}`);
   }
   if (!doc.lines.length) add('; 線がありません', null, true);
+  if (shapes.length) {
+    add('', null);
+    add('; 閉じた図形', null, true);
+    const roleName = { outer: '外形', hole: '穴', notch: '切り欠き' };
+    const outerNo = new Map();
+    shapes.forEach((s, i) => { if (s.role === 'outer') outerNo.set(i, outerNo.size + 1); });
+    shapes.forEach((s, i) => {
+      const xs = s.poly.map((v) => v.x), ys = s.poly.map((v) => v.y);
+      const of = s.role === 'outer' ? `S${outerNo.get(i)}` : `S${outerNo.get(s.parent)} の${roleName[s.role]}`;
+      add(`${of}  ${s.poly.length}角 X${fmt(relX(Math.min(...xs)))}〜${fmt(relX(Math.max(...xs)))} Y${fmt(relY(Math.min(...ys)))}〜${fmt(relY(Math.max(...ys)))}`, null);
+    });
+  }
   if (doc.dims.length) {
     add('', null);
     add('; 寸法', null, true);
