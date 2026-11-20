@@ -224,6 +224,27 @@ const Geo = (() => {
     }
   }
 
+  // 線を平行に delta 動かす（水平線は Y、垂直線は X）。
+  // 線と、線・寸法で同じ位置に決まっているもの（その方向のまとまり）をまとめて動かすので、寸法は保たれる。
+  // 両端につながった線は伸び縮みし、反対側まで動かせば向きが逆になる。
+  // 長さが 0 になる線ができるときは動かさず false を返す。
+  function moveLine(doc, lineId, delta) {
+    const l = lineById(doc, lineId);
+    if (!l) return false;
+    const axis = l.dir === 'h' ? 'y' : 'x';
+    const uf = build(doc, axis);
+    const root = uf.find(l.a);
+    const moved = doc.points.filter((p) => uf.find(p.id) === root);
+    const old = moved.map((p) => p[axis]);
+    for (const p of moved) p[axis] = r3(p[axis] + delta);
+    const zero = doc.lines.some((m) => {
+      const a = pointById(doc, m.a), b = pointById(doc, m.b);
+      return Math.abs(a.x - b.x) < EPS && Math.abs(a.y - b.y) < EPS;
+    });
+    if (zero) moved.forEach((p, i) => { p[axis] = old[i]; });
+    return !zero;
+  }
+
   // ---- なぞった線を水平・垂直の折れ線にする ----
   // pts: [{x, y}]（mm）。T: 曲がったと見なす指の移動量（mm）。戻り値: 頂点の列（2 つ以上）か null
   //
@@ -413,7 +434,7 @@ const Geo = (() => {
   }
 
   return {
-    EPS, AXES, r3, pointById, lineById, analyze, build, addDim, setDimValue, moveGroups,
+    EPS, AXES, r3, pointById, lineById, analyze, build, addDim, setDimValue, moveGroups, moveLine,
     strokeToPolyline, cleanPolyline, deleteLines, closedShapes, classifyShapes, inside, overlaps,
   };
 })();

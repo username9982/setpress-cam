@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.7.2';
+const APP_VERSION = '0.8.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -102,6 +102,7 @@ const D = (id) => doc.dims.find((d) => d.id === id);
 // ワーク原点は外形ごとに、外形を囲む四角の左上。座標は原点から右へ X+、下へ Y+ で表す。
 // どの外形にも属さないものは、板の左上から測る。
 const sheetTopLeft = () => ({ x: 0, y: doc.sheet.h });
+function originForPoint(pid) { const k = info.owner.get(pid); return k == null ? sheetTopLeft() : info.outers[k].origin; }
 function originAt(x, y) { const k = info.outerAt(x, y); return k == null ? sheetTopLeft() : info.outers[k].origin; }
 function rel(o, x, y) { return { x: round(x - o.x), y: round(o.y - y) }; }
 function elemExists(s) { return s.t === 'point' ? !!P(s.id) : s.t === 'line' ? !!L(s.id) : !!D(s.id); }
@@ -591,8 +592,11 @@ canvas.addEventListener('pointermove', (e) => {
     const h = drag.hit;
     if (h && h.t !== 'dim' && Math.hypot(pos[0] - drag.start[0], pos[1] - drag.start[1]) > 8) {
       snapshot();
-      const ids = h.t === 'point' ? [h.id] : [L(h.id).a, L(h.id).b];
-      drag = { kind: 'move', ids, world: drag.world, orig: doc.points.map((p) => ({ ...p })) };
+      // 線は平行に動かす（両端につながった線が伸び縮みする）。点はまとまりごと動かす
+      drag = {
+        kind: 'move', ids: h.t === 'point' ? [h.id] : [], lineId: h.t === 'line' ? h.id : null,
+        world: drag.world, orig: doc.points.map((p) => ({ ...p })), last: 0,
+      };
     }
   }
   if (drag && drag.kind === 'move') {
@@ -601,9 +605,20 @@ canvas.addEventListener('pointermove', (e) => {
     const s = snapStep();
     const dx = round(Math.round((wx - drag.world[0]) / s) * s);
     const dy = round(Math.round((wy - drag.world[1]) / s) * s);
-    Geo.moveGroups(doc, drag.ids, dx, dy);
-    updateUi();
-    draw();
+    if (drag.lineId != null) {
+      // 長さ 0 の線ができる位置には止めず、その手前の位置のままにする
+      const delta = L(drag.lineId).dir === 'h' ? dy : dx;
+      if (Geo.moveLine(doc, drag.lineId, delta)) drag.last = delta;
+      else Geo.moveLine(doc, drag.lineId, drag.last);
+    } else {
+      Geo.moveGroups(doc, drag.ids, dx, dy);
+    }
+    refresh();  // 外形の原点や塗りも動かしながら描き直す
+    if (drag.lineId != null) {
+      const l = L(drag.lineId);
+      const r = rel(originForPoint(l.a), P(l.a).x, P(l.a).y);
+      $('st-pos').textContent = l.dir === 'h' ? `線 ${lName(l.id)}  Y ${r.y}` : `線 ${lName(l.id)}  X ${r.x}`;
+    }
   }
 });
 
