@@ -101,7 +101,7 @@ input[type=number], input[type=text], select {
 #layout-body button { width: 100%; }
 .lp-row { display: flex; gap: 8px; align-items: baseline; }
 .lp-label { color: #667; font-size: 13px; flex: none; }
-#lp-r { width: 70px; }
+#lp-mj { width: 70px; }
 #lp-work { font-weight: 700; }
 #lp-summary { font-size: 14px; line-height: 1.6; white-space: pre-wrap; }
 #lp-warn { margin: 0; padding-left: 1.2em; color: #b3261e; font-size: 13px; line-height: 1.5; }

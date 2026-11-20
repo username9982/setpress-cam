@@ -23,7 +23,7 @@
   [hidden] { display: none !important; }
   #stage { position: relative; flex: 1; min-width: 0; min-height: 0; }
 </style>
-<link rel="stylesheet" href="style.css?v=0.16.1">
+<link rel="stylesheet" href="style.css?v=0.16.2">
 <!-- ?v= は tools/bump_version.py で書き換える。古い style.css・app.js と組み合わさらないようにするため -->
 </head>
 <body>
@@ -71,10 +71,10 @@
     <button id="btn-autolayout" type="button" class="primary" disabled>自動割付</button>
     <button id="btn-clearlayout" type="button" disabled>割付を消す</button>
     <div id="lp-summary"></div>
-    <div class="lp-row" id="lp-r-row" hidden><span class="lp-label">F13 角 R</span>
-      <input id="lp-r" type="number" inputmode="decimal" min="0" step="any" aria-label="F13 の角 R"> mm</div>
+    <div class="lp-row" id="lp-mj-row" hidden><span class="lp-label">ミクロジョイント</span>
+      <input id="lp-mj" type="number" inputmode="decimal" min="0" step="any" aria-label="ミクロジョイント"> mm</div>
     <ul id="lp-warn"></ul>
-    <p class="lp-note">穴を長方形に分けて、それぞれ F3（開始点 左上 → XY 寸法 → 金型 XY 寸法）で抜きます。金型は長方形の金型のうち、穴に入るいちばん大きいものを使います。長方形の継ぎ目は、抜かない所にぶつからなければ金型寸法の約 1/3 重ねます。外形が単純な長方形なら、最後に F13（開始点 左上 → 外形 XY → 金型 XY → 角 R）で輪郭を抜きます。値は金型寸法のぶん外側にオフセットします。抜く長方形やコードの F3 をタップすると、その 1 回で抜く範囲をハイライトします。</p>
+    <p class="lp-note">穴を長方形に分けて、それぞれ F3（開始点 左上 → XY 寸法 → 金型 XY 寸法）で抜きます。金型は長方形の金型のうち、穴に入るいちばん大きいものを使います。長方形の継ぎ目は、抜かない所にぶつからなければ金型寸法の約 1/3 重ねます。外形が単純な長方形なら、最後に F13（開始点 左上 → 外形 XY → 金型 XY → 角 R）で輪郭を抜きます。値は金型寸法のぶん外側にオフセットします。ミクロジョイントを入れると、角 R を 金型寸法 + ミクロジョイント にして角を少しつなげたままにします（長方形の金型では、短いほうの辺の余りを F13 の前に単発で抜きます）。抜く長方形やコードの F3 をタップすると、その 1 回で抜く範囲をハイライトします。</p>
   </div>
 </aside>
 <main id="stage">
@@ -154,7 +154,7 @@
   </form>
 </dialog>
 
-<script src="geom.js?v=0.16.1"></script>
-<script src="app.js?v=0.16.1"></script>
+<script src="geom.js?v=0.16.2"></script>
+<script src="app.js?v=0.16.2"></script>
 </body>
 </html>

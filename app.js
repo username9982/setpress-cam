@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.16.1';
+const APP_VERSION = '0.16.2';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1323,7 +1323,7 @@ function autoLayout() {
     const t = tool == null ? null : doc.tools[tool];
     const dw = t ? t.w : 0, dh = t ? t.h : 0;
     if (tool == null) warn.push('外形を抜く長方形の金型がありません。');
-    hits.push({ macro: 'F13', tool, r: 0, x0: round(box.x0 - dw), y0: round(box.y0 - dh), x1: round(box.x1 + dw), y1: round(box.y1 + dh) });
+    hits.push({ macro: 'F13', tool, mj: 0, x0: round(box.x0 - dw), y0: round(box.y0 - dh), x1: round(box.x1 + dw), y1: round(box.y1 + dh) });
   } else {
     warn.push('外形が単純な長方形ではないので、外形はまだ割り付けません。');
   }
@@ -1347,21 +1347,55 @@ function clearLayout() {
 }
 $('btn-autolayout').addEventListener('click', autoLayout);
 $('btn-clearlayout').addEventListener('click', clearLayout);
-// F13 の角 R: 入れた長方形の角から R の所までは抜かずに残す。0〜短い辺の半分
-numberInput('lp-r', () => 0, () => {
-  const h = layoutWork == null ? null : layoutOf(layoutWork)?.hits.find((q) => macroOf(q) === 'F13');
-  return h ? Math.min(h.x1 - h.x0, h.y1 - h.y0) / 2 : 0;
+// ミクロジョイント: 外形の角を少しだけつなげたままにする（mm）。0 ならつなげない（角 R 0）。
+// F13 は角 R のぶん各辺の両端を開けて抜くので、角 R = 金型寸法 + ミクロジョイント を入れる
+// （例: 15 mm 角の金型でミクロジョイント 0.2 なら角 R 15.2。角が 0.2 mm ずつつながる）。
+const selF13 = () => { const lay = layoutWork == null ? null : layoutOf(layoutWork); return lay && lay.hits.find((q) => macroOf(q) === 'F13'); };
+numberInput('lp-mj', () => 0, () => {
+  const h = selF13();
+  const t = h && h.tool != null ? doc.tools[h.tool] : null;
+  return h && t ? Math.max(0, Math.min(h.x1 - h.x0, h.y1 - h.y0) / 2 - Math.max(t.w, t.h)) : 0;
 }, (v) => {
-  const lay = layoutWork == null ? null : layoutOf(layoutWork);
-  const h = lay && lay.hits.find((q) => macroOf(q) === 'F13');
-  if (!h || v === (h.r || 0)) { updateUi(); return; }
-  snapshot(); h.r = v; changed();
+  const h = selF13();
+  if (!h || v === (h.mj || 0)) { updateUi(); return; }
+  snapshot(); h.mj = v; changed();
 });
+function f13R(h) {
+  const t = h.tool == null ? null : doc.tools[h.tool];
+  return h.mj && t ? round(Math.max(t.w, t.h) + h.mj) : 0;
+}
+// 長方形の金型では、角 R を長いほうの金型寸法に合わせると、短いほうの辺ではつながりが長く残る。
+// その余りを F13 の前に単発で抜いておく（金型の中心の座標を入れる）。4 つの角に、余りの長さ ÷ 金型寸法 回ずつ。
+function f13Singles(h) {
+  const t = h.tool == null ? null : doc.tools[h.tool];
+  if (!t || !h.mj || Math.abs(t.w - t.h) < 1e-6) return [];
+  const out = [];
+  const mj = h.mj;
+  // 並べる向きの金型寸法 len で、区間 [a, b] を端から端まで覆う位置（両端にそろえ、間は等しく重ねる）
+  const spots = (a, b, len) => {
+    const n = Math.max(1, Math.ceil((b - a) / len - 1e-6));
+    return Array.from({ length: n }, (_, i) => (n === 1 ? a : a + (b - a - len) * i / (n - 1)));
+  };
+  if (t.w > t.h) {
+    // 左右の帯（縦に送る、送りの向きの寸法は t.h）の、角に近い所に余りが残る
+    const ranges = [[h.y1 - t.w - mj, h.y1 - t.h - mj], [h.y0 + t.h + mj, h.y0 + t.w + mj]];
+    for (const xs of [h.x0, h.x1 - t.w]) {
+      for (const [a, b] of ranges) for (const y of spots(a, b, t.h)) out.push({ x0: xs, x1: xs + t.w, y0: y, y1: y + t.h });
+    }
+  } else {
+    // 上下の帯（横に送る、送りの向きの寸法は t.w）
+    const ranges = [[h.x0 + t.w + mj, h.x0 + t.h + mj], [h.x1 - t.h - mj, h.x1 - t.w - mj]];
+    for (const ys of [h.y1 - t.h, h.y0]) {
+      for (const [a, b] of ranges) for (const x of spots(a, b, t.w)) out.push({ x0: x, x1: x + t.w, y0: ys, y1: ys + t.h });
+    }
+  }
+  return out.map((q) => ({ x0: round(q.x0), x1: round(q.x1), y0: round(q.y0), y1: round(q.y1) }));
+}
 // F13 で実際に抜く帯: 入れた長方形の内側を金型の幅で回り、各辺の両端は角 R のぶん残す
 function f13Strips(h) {
   const t = h.tool == null ? null : doc.tools[h.tool];
   if (!t) return [];
-  const r = h.r || 0;
+  const r = f13R(h);
   return [
     { x0: h.x0 + r, x1: h.x1 - r, y0: h.y1 - t.h, y1: h.y1 },  // 上
     { x0: h.x0 + r, x1: h.x1 - r, y0: h.y0, y1: h.y0 + t.h },  // 下
@@ -1399,8 +1433,8 @@ function updateLayoutPanel() {
   }
   $('lp-summary').textContent = summary;
   const f13 = lay && lay.hits.find((h) => macroOf(h) === 'F13');
-  $('lp-r-row').hidden = !f13;
-  if (f13 && document.activeElement !== $('lp-r')) $('lp-r').value = f13.r || 0;
+  $('lp-mj-row').hidden = !f13;
+  if (f13 && document.activeElement !== $('lp-mj')) $('lp-mj').value = f13.mj || 0;
   const ul = $('lp-warn');
   ul.textContent = '';
   for (const w of warn) { const li = document.createElement('li'); li.textContent = w; ul.append(li); }
@@ -1431,9 +1465,9 @@ function drawLayout() {
       ctx.strokeStyle = col;
       ctx.lineWidth = 1.5;
       ctx.setLineDash([5, 3]);
-      if (macroOf(h) === 'F13' && h.r) {
-        // 角 R のぶん抜かずに残る所があるので、抜く帯の形で描く
-        for (const q of f13Strips(h)) {
+      if (macroOf(h) === 'F13' && h.mj) {
+        // ミクロジョイントで角が残るので、抜く帯と単発の形で描く
+        for (const q of [...f13Strips(h), ...f13Singles(h)]) {
           const [px, py] = toScreen(q.x0, q.y1), [qx, qy] = toScreen(q.x1, q.y0);
           ctx.strokeRect(px, py, qx - px, qy - py);
         }
@@ -1464,9 +1498,9 @@ function drawLayout() {
     ctx.lineWidth = 3;
     const t = h.tool == null ? null : doc.tools[h.tool];
     if (macroOf(h) === 'F13' && t) {
-      // F13: 金型が通る輪郭の帯を塗る。角 R のぶん残る所は塗らない
+      // F13: 金型が通る輪郭の帯と、前に抜く単発を塗る。ミクロジョイントで残る所は塗らない
       ctx.beginPath();
-      for (const q of f13Strips(h)) {
+      for (const q of [...f13Strips(h), ...f13Singles(h)]) {
         const [px, py] = toScreen(q.x0, q.y1), [qx, qy] = toScreen(q.x1, q.y0);
         ctx.rect(px, py, qx - px, qy - py);
       }
@@ -1514,11 +1548,16 @@ function genCode() {
       const f13 = macroOf(h) === 'F13';
       add(f13 ? `; ${i + 1} 外形  F13: 開始点（左上）→ 外形 XY → 金型 XY → 角 R（金型寸法のぶん外側）` : `; ${i + 1}`, hk, true);
       if (h.tool != null && h.tool !== curTool) { add(`T${h.tool + 1}`, hk); curTool = h.tool; }
+      if (f13) {
+        const singles = f13Singles(h);
+        if (singles.length) add('; 単発（短いほうの辺のつながりを、ミクロジョイントの長さまで先に抜く）  金型の中心', hk, true);
+        for (const q of singles) add(xy((q.x0 + q.x1) / 2 - o.x, o.y - (q.y0 + q.y1) / 2, '単発 中心'), hk);
+      }
       add(macroOf(h), hk);
       add(xy(h.x0 - o.x, o.y - h.y1, '開始点'), hk);
       add(xy(h.x1 - h.x0, h.y1 - h.y0, f13 ? '外形' : '寸法'), hk);
       add(t ? xy(t.w, t.h, '金型') : '  ?       ?       ; 金型（入る長方形の金型がない）', hk);
-      if (f13) add(`  ${('R' + fmt(h.r || 0)).padEnd(16)}; 角 R`, hk);
+      if (f13) add(`  ${('R' + fmt(f13R(h))).padEnd(16)}; 角 R${h.mj ? `（金型 + ミクロジョイント ${fmt(h.mj)}）` : ''}`, hk);
     });
     if (!lay.hits.length) add('; 穴がありません', null, true);
   }
@@ -1694,7 +1733,7 @@ function loadDoc(d) {
       work: Number(q.work), src: String(q.src || ''),
       hits: (Array.isArray(q.hits) ? q.hits : []).map((h) => ({
         tool: Number.isInteger(h.tool) ? h.tool : null, x0: num(h.x0), y0: num(h.y0), x1: num(h.x1), y1: num(h.y1),
-        ...(h.macro === 'F13' ? { macro: 'F13', r: Number.isFinite(num(h.r)) ? num(h.r) : 0 } : {}),
+        ...(h.macro === 'F13' ? { macro: 'F13', mj: Number.isFinite(num(h.mj)) && num(h.mj) > 0 ? num(h.mj) : 0 } : {}),
       })).filter((h) => [h.x0, h.y0, h.x1, h.y1].every(Number.isFinite)),
       warn: (Array.isArray(q.warn) ? q.warn : []).map(String),
       org: q.org && Number.isFinite(Number(q.org.x)) && Number.isFinite(Number(q.org.y)) ? { x: Number(q.org.x), y: Number(q.org.y) } : null,
