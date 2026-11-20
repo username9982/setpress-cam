@@ -71,7 +71,57 @@ input[type=number], input[type=text], select {
 }
 #toolbar input[type=number] { width: 80px; }
 
-#stage { position: relative; flex: 1; min-height: 0; }
+#work { display: flex; flex: 1; min-height: 0; }
+#stage { position: relative; flex: 1; min-width: 0; min-height: 0; }
+
+/* コードの区画: 横向きは右側、縦向きは下側 */
+#code-panel {
+  display: flex;
+  flex-direction: column;
+  width: 340px;
+  border-left: 1px solid var(--line);
+  background: #fbfcfd;
+}
+@media (orientation: portrait) {
+  #work { flex-direction: column; }
+  #code-panel { width: auto; height: 34%; border-left: none; border-top: 1px solid var(--line); }
+}
+.code-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #dfe4e9;
+}
+.code-title { font-weight: 700; }
+.code-note { font-size: 13px; color: #667; margin-right: auto; }
+.code-head button { min-height: 36px; min-width: 0; }
+#code {
+  flex: 1;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 6px 0;
+  font-family: ui-monospace, Menlo, Consolas, "Courier New", monospace;
+  font-size: 15px;
+  line-height: 1.6;
+  white-space: pre;
+  -webkit-user-select: text;
+  user-select: text;
+}
+#code .ln { display: flex; padding: 0 10px 0 0; }
+#code .ln .no {
+  flex: none;
+  width: 3em;
+  padding-right: 10px;
+  text-align: right;
+  color: #9aa5b0;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#code .ln.cmt .tx { color: #5f7a5f; }
+#code .ln.rect { cursor: pointer; }
+#code .ln.sel { background: rgba(232, 163, 61, 0.22); }
 
 #canvas {
   position: absolute;

@@ -3,7 +3,7 @@
 // セットプレス CAM — 動作確認版: 四角形を描いて保存する。
 // 座標はすべて mm。原点は板の左下、Y は上向き（機械の座標に合わせる）。
 
-const APP_VERSION = '0.1.1';
+const APP_VERSION = '0.2.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -263,6 +263,7 @@ canvas.addEventListener('pointermove', (e) => {
     r.y = Math.min(Math.max(ny, 0), round(doc.sheet.h - r.h));
     if (r.x !== drag.orig[0] || r.y !== drag.orig[1]) drag.moved = true;
     updateProps();
+    renderCode();
     draw();
   }
 });
@@ -335,7 +336,80 @@ function updateUi() {
   $('st-name').textContent = (doc.name || '名前なし') + (dirty ? ' *' : '');
   $('st-count').textContent = `四角形 ${doc.rects.length} 個`;
   updateProps();
+  renderCode();
 }
+
+// ---- コードの区画 ----
+// 機械の入力形式が決まるまでの仮の形式。四角形ごとに、左下の角から反時計回りに一周する。
+function fmt(v) {
+  return String(round(v));
+}
+function genCode() {
+  const lines = [];  // {text, rectId?, comment?}
+  const add = (text, rectId, comment = false) => lines.push({ text, rectId, comment });
+  add(`; セットプレス CAM v${APP_VERSION}（仮の形式）`, null, true);
+  add(`; 図面 ${doc.name || '名前なし'}  板 ${fmt(doc.sheet.w)} x ${fmt(doc.sheet.h)} mm`, null, true);
+  add('G21 G90', null);
+  let n = 10;
+  const nl = (s, id) => { add(`N${n} ${s}`, id); n += 10; };
+  doc.rects.forEach((r, i) => {
+    const x1 = r.x, y1 = r.y, x2 = r.x + r.w, y2 = r.y + r.h;
+    add(`; 四角形 ${i + 1}  幅 ${fmt(r.w)}  高さ ${fmt(r.h)}`, r.id, true);
+    nl(`G00 X${fmt(x1)} Y${fmt(y1)}`, r.id);
+    nl(`G01 X${fmt(x2)} Y${fmt(y1)}`, r.id);
+    nl(`G01 X${fmt(x2)} Y${fmt(y2)}`, r.id);
+    nl(`G01 X${fmt(x1)} Y${fmt(y2)}`, r.id);
+    nl(`G01 X${fmt(x1)} Y${fmt(y1)}`, r.id);
+  });
+  if (!doc.rects.length) add('; 四角形がありません', null, true);
+  nl('M30', null);
+  return lines;
+}
+
+let lastCodeSel = null;
+function renderCode() {
+  const box = $('code');
+  const lines = genCode();
+  box.textContent = '';
+  let firstSel = null;
+  lines.forEach((l, i) => {
+    const row = document.createElement('div');
+    row.className = 'ln' + (l.comment ? ' cmt' : '') + (l.rectId != null ? ' rect' : '') +
+      (l.rectId != null && l.rectId === selectedId ? ' sel' : '');
+    if (l.rectId != null) row.dataset.rect = l.rectId;
+    const no = document.createElement('span');
+    no.className = 'no';
+    no.textContent = i + 1;
+    const tx = document.createElement('span');
+    tx.className = 'tx';
+    tx.textContent = l.text;
+    row.append(no, tx);
+    box.append(row);
+    if (!firstSel && row.classList.contains('sel')) firstSel = row;
+  });
+  // 選んだ四角形が変わったときだけ、その行まで送る
+  if (selectedId !== lastCodeSel && firstSel) firstSel.scrollIntoView({ block: 'nearest' });
+  lastCodeSel = selectedId;
+}
+
+// 行をタップすると、その四角形を選ぶ
+$('code').addEventListener('click', (e) => {
+  const row = e.target.closest('.ln.rect');
+  if (!row || (window.getSelection && String(window.getSelection()).length)) return;
+  selectedId = Number(row.dataset.rect);
+  updateUi();
+  draw();
+});
+
+$('btn-copy').addEventListener('click', async () => {
+  const text = genCode().map((l) => l.text).join('\n') + '\n';
+  try {
+    await navigator.clipboard.writeText(text);
+    flash('コードをコピーしました');
+  } catch (e) {
+    flash('コピーできませんでした');
+  }
+});
 
 function flash(msg) {
   $('st-msg').textContent = msg;

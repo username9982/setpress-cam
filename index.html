@@ -43,6 +43,7 @@
   </div>
 </header>
 
+<div id="work">
 <main id="stage">
   <canvas id="canvas"></canvas>
   <div id="props" hidden>
@@ -54,6 +55,16 @@
     <div class="props-note">単位 mm・左下が原点</div>
   </div>
 </main>
+
+<aside id="code-panel">
+  <div class="code-head">
+    <span class="code-title">コード</span>
+    <span class="code-note">仮の形式</span>
+    <button id="btn-copy" type="button">コピー</button>
+  </div>
+  <div id="code" role="textbox" aria-readonly="true" aria-multiline="true" aria-label="コード"></div>
+</aside>
+</div>
 
 <footer id="status">
   <span id="st-name">名前なし</span>
