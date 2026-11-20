@@ -14,12 +14,14 @@
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <style>
   /* style.css が読めなかったときでも、描く領域が潰れないようにする最低限の配置 */
+  * { touch-action: pan-x pan-y; }
+  #canvas { touch-action: none; }
   html, body { height: 100%; margin: 0; }
   body { display: flex; flex-direction: column; }
   #work { display: flex; flex: 1; min-height: 0; }
   #stage { position: relative; flex: 1; min-width: 0; min-height: 0; }
 </style>
-<link rel="stylesheet" href="style.css?v=0.7.0">
+<link rel="stylesheet" href="style.css?v=0.7.1">
 <!-- ?v= は tools/bump_version.py で書き換える。古い style.css・app.js と組み合わさらないようにするため -->
 </head>
 <body>
@@ -128,7 +130,7 @@
   </form>
 </dialog>
 
-<script src="geom.js?v=0.7.0"></script>
-<script src="app.js?v=0.7.0"></script>
+<script src="geom.js?v=0.7.1"></script>
+<script src="app.js?v=0.7.1"></script>
 </body>
 </html>

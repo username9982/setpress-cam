@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.7.0';
+const APP_VERSION = '0.7.1';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -655,6 +655,8 @@ canvas.addEventListener('wheel', (e) => {
 
 // iOS Safari のジェスチャー（ページ全体の拡大）を止める
 document.addEventListener('gesturestart', (e) => e.preventDefault());
+// ダブルタップ・ダブルクリックでの拡大を止める（touch-action が効かない古い環境の予備）
+document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
 
 // ---- 画面の部品 ----
 function setMode(m) {

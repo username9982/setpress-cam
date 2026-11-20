@@ -8,7 +8,12 @@
   --line: #c4ccd4;
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+  /* ダブルタップでの拡大とピンチでのページ拡大を止める（縦横のスクロールだけ許す）。
+     iOS Safari は viewport の user-scalable=no を無視するので、こちらで止める */
+  touch-action: pan-x pan-y;
+}
 
 html, body {
   margin: 0;
