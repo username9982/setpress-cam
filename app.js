@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.12.0';
+const APP_VERSION = '0.13.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -355,15 +355,20 @@ function drawSheetOrigin() {
 }
 
 // 板の原点から外形の原点までの寸法。X は板の上の辺の外側、Y は左の辺の外側に引く
+// 板の原点からの寸法線と板の辺との間（mm）。「移動」で動かしたら d.off、そうでなければ自動で段にする
+function sheetGap(d) {
+  if (d.off != null) return d.off;
+  // 同じ向きの板の原点からの寸法を、外へ段にして並べる（短いものを内側）
+  const n = doc.dims.filter((q) => q.kind === 'sheet' && q.axis === d.axis &&
+    (Math.abs(q.value) < Math.abs(d.value) || (q.value === d.value && q.id < d.id))).length;
+  return (22 + 26 * n) / view.scale;
+}
 function drawSheetDim(d) {
   const k = info.owner.get(d.b);
   if (k == null) return;
   const o = info.outers[k].origin;
   const s = isSel('dim', d.id);
-  // 同じ向きの板の原点からの寸法を、外へ段にして並べる
-  const n = doc.dims.filter((q) => q.kind === 'sheet' && q.axis === d.axis &&
-    (Math.abs(q.value) < Math.abs(d.value) || (q.value === d.value && q.id < d.id))).length;  // 短いものを内側
-  const gap = (22 + 26 * n) / view.scale;
+  const gap = sheetGap(d);
   const h = doc.sheet.h;
   let p1, p2, e;
   if (d.axis === 'x') { p1 = [0, h + gap]; p2 = [o.x, h + gap]; e = [o.x, o.y]; }
@@ -402,6 +407,8 @@ function layoutDims() {
   }
   return doc.dims.map((d) => {
     if (d.kind === 'sheet') return null;  // 板の外側に別に描く
+    // 「移動」で動かした寸法は、寸法の a の点からのずれ（d.off、mm）の位置に置く。図形を動かしても付いてくる
+    if (d.off != null) return P(d.a)[d.axis === 'x' ? 'y' : 'x'] + d.off;
     if (d.kind === 'len' && !rank.has(d.id)) {
       const l = L(d.refs[0].id);
       const across = l.dir === 'h' ? 'y' : 'x';
@@ -747,7 +754,7 @@ canvas.addEventListener('pointermove', (e) => {
     // 「移動」で点か線を押したまま 8px 動いたら、選んだものをまとめて動かし始める。
     // 選んでいないものをつかんだときは、それだけを選び直して動かす
     const h = drag.hit;
-    if (mode === 'move' && h && h.t !== 'dim' && Math.hypot(pos[0] - drag.start[0], pos[1] - drag.start[1]) > 8) {
+    if (mode === 'move' && h && Math.hypot(pos[0] - drag.start[0], pos[1] - drag.start[1]) > 8) {
       if (!isSel(h.t, h.id)) sel = [h];
       snapshot();
       // ワーク原点を選んでいれば、その外形（穴・切り欠き・つながった線を含む）をまるごと動かす。
@@ -760,8 +767,15 @@ canvas.addEventListener('pointermove', (e) => {
       const inFamily = (pid) => families.some((f) => f.pids.has(pid));
       const items = sel.filter((q) => (q.t === 'line' ? !(inFamily(L(q.id).a) && inFamily(L(q.id).b))
         : q.t === 'point' ? !inFamily(q.id) : false)).map((q) => ({ ...q }));
+      // 寸法は、寸法線を寸法線と直角な方向に動かす（値は変わらない）。動かし始めの位置を覚えておく
+      const levels = layoutDims();
+      const dims = sel.filter((q) => q.t === 'dim' && D(q.id)).map((q) => {
+        const d = D(q.id);
+        const start = d.kind === 'sheet' ? sheetGap(d) : levels[doc.dims.indexOf(d)] - P(d.a)[d.axis === 'x' ? 'y' : 'x'];
+        return { id: d.id, start, before: d.off };
+      });
       drag = {
-        kind: 'move', items, families,
+        kind: 'move', items, families, dims,
         world: drag.world, orig: doc.points.map((p) => ({ ...p })), last: [0, 0],
       };
     }
@@ -784,6 +798,15 @@ canvas.addEventListener('pointermove', (e) => {
     for (const f of drag.families) {
       for (const p of doc.points) if (f.pids.has(p.id)) { p.x = round(p.x + dx); p.y = round(p.y + dy); }
       for (const d of f.sheet) d.value = round(d.axis === 'x' ? f.origin.x + dx : doc.sheet.h - (f.origin.y + dy));
+    }
+    // 寸法線はグリッドに合わせず、指の動きのまま動かす
+    const rdx = wx - drag.world[0], rdy = wy - drag.world[1];
+    for (const m of drag.dims) {
+      const d = D(m.id);
+      if (!d) continue;
+      // 板の原点からの寸法: X は板の上（+Y 側）へ離れるほど、Y は板の左（−X 側）へ離れるほど間が広がる
+      const delta = d.kind === 'sheet' ? (d.axis === 'x' ? rdy : -rdx) : (d.axis === 'x' ? rdy : rdx);
+      d.off = round(m.start + delta);
     }
     applyPlacements();  // 板の原点から位置を決めた外形は、その位置に保つ
     refresh();  // 外形の原点や塗りも動かしながら描き直す
@@ -811,7 +834,8 @@ function endPointer(e) {
     if (mode === 'dim') tapSelect(d.hit);
     else if (mode === 'move') tapSelectMany(d.hit);
   } else if (d.kind === 'move') {
-    const movedAny = doc.points.some((p, i) => p.x !== d.orig[i].x || p.y !== d.orig[i].y);
+    const movedAny = doc.points.some((p, i) => p.x !== d.orig[i].x || p.y !== d.orig[i].y) ||
+      d.dims.some((m) => { const q = D(m.id); return q && q.off !== m.before; });
     if (movedAny) changed(); else { undoStack.pop(); draw(); }
   }
 }
@@ -819,10 +843,9 @@ canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
 
 // タップで選ぶ: 同じものは外す、2 つまで足す、3 つ目は選び直し。寸法は 1 つだけ選ぶ。
-// 「移動」ではいくつでも選べる（タップで足す・外す）。寸法の数字は選ばない。何もない所で全部外す。
+// 「移動」ではいくつでも選べる（タップで足す・外す）。寸法の数字も選べる（寸法線の位置を動かす）。何もない所で全部外す。
 function tapSelectMany(hit) {
   if (!hit) sel = [];
-  else if (hit.t === 'dim') return;
   else if (isSel(hit.t, hit.id)) sel = sel.filter((s) => !(s.t === hit.t && s.id === hit.id));
   else sel = [...sel, hit];
   updateUi();
@@ -1296,6 +1319,7 @@ function loadDoc(d) {
     .map((q) => ({
       id: Number(q.id), axis: q.axis === 'y' ? 'y' : 'x', a: Number(q.a), b: Number(q.b), value: num(q.value),
       kind: String(q.kind || 'pp'), refs: (q.refs || []).map((r) => ({ t: r.t, id: Number(r.id) })),
+      ...(Number.isFinite(Number(q.off)) && q.off !== null ? { off: num(q.off) } : {}),
     }))
     .filter((q) => ids.has(q.a) && ids.has(q.b) && Number.isFinite(q.value) && q.refs.length && q.refs.every(refOk));
   // v0.6 までの図面のワーク原点（図面に 1 つ）は、線がつながっていればふつうの点として残し、
