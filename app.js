@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.16.0';
+const APP_VERSION = '0.16.1';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1347,6 +1347,28 @@ function clearLayout() {
 }
 $('btn-autolayout').addEventListener('click', autoLayout);
 $('btn-clearlayout').addEventListener('click', clearLayout);
+// F13 の角 R: 入れた長方形の角から R の所までは抜かずに残す。0〜短い辺の半分
+numberInput('lp-r', () => 0, () => {
+  const h = layoutWork == null ? null : layoutOf(layoutWork)?.hits.find((q) => macroOf(q) === 'F13');
+  return h ? Math.min(h.x1 - h.x0, h.y1 - h.y0) / 2 : 0;
+}, (v) => {
+  const lay = layoutWork == null ? null : layoutOf(layoutWork);
+  const h = lay && lay.hits.find((q) => macroOf(q) === 'F13');
+  if (!h || v === (h.r || 0)) { updateUi(); return; }
+  snapshot(); h.r = v; changed();
+});
+// F13 で実際に抜く帯: 入れた長方形の内側を金型の幅で回り、各辺の両端は角 R のぶん残す
+function f13Strips(h) {
+  const t = h.tool == null ? null : doc.tools[h.tool];
+  if (!t) return [];
+  const r = h.r || 0;
+  return [
+    { x0: h.x0 + r, x1: h.x1 - r, y0: h.y1 - t.h, y1: h.y1 },  // 上
+    { x0: h.x0 + r, x1: h.x1 - r, y0: h.y0, y1: h.y0 + t.h },  // 下
+    { x0: h.x0, x1: h.x0 + t.w, y0: h.y0 + r, y1: h.y1 - r },  // 左
+    { x0: h.x1 - t.w, x1: h.x1, y0: h.y0 + r, y1: h.y1 - r },  // 右
+  ].filter((q) => q.x1 - q.x0 > 1e-6 && q.y1 - q.y0 > 1e-6);
+}
 
 function updateLayoutPanel() {
   const panel = $('layout-panel');
@@ -1376,6 +1398,9 @@ function updateLayoutPanel() {
     if (notches) warn.push(`切り欠き ${notches} 個は、まだ割り付けません。`);
   }
   $('lp-summary').textContent = summary;
+  const f13 = lay && lay.hits.find((h) => macroOf(h) === 'F13');
+  $('lp-r-row').hidden = !f13;
+  if (f13 && document.activeElement !== $('lp-r')) $('lp-r').value = f13.r || 0;
   const ul = $('lp-warn');
   ul.textContent = '';
   for (const w of warn) { const li = document.createElement('li'); li.textContent = w; ul.append(li); }
@@ -1406,7 +1431,15 @@ function drawLayout() {
       ctx.strokeStyle = col;
       ctx.lineWidth = 1.5;
       ctx.setLineDash([5, 3]);
-      ctx.strokeRect(ax, ay, bx - ax, by - ay);
+      if (macroOf(h) === 'F13' && h.r) {
+        // 角 R のぶん抜かずに残る所があるので、抜く帯の形で描く
+        for (const q of f13Strips(h)) {
+          const [px, py] = toScreen(q.x0, q.y1), [qx, qy] = toScreen(q.x1, q.y0);
+          ctx.strokeRect(px, py, qx - px, qy - py);
+        }
+      } else {
+        ctx.strokeRect(ax, ay, bx - ax, by - ay);
+      }
       ctx.setLineDash([]);
       const t = h.tool == null ? null : doc.tools[h.tool];
       if (t) {
@@ -1431,14 +1464,15 @@ function drawLayout() {
     ctx.lineWidth = 3;
     const t = h.tool == null ? null : doc.tools[h.tool];
     if (macroOf(h) === 'F13' && t) {
-      // F13: 金型が通る輪郭の帯だけを塗る
-      const [cx, cy] = toScreen(h.x0 + t.w, h.y1 - t.h), [dx, dy] = toScreen(h.x1 - t.w, h.y0 + t.h);
+      // F13: 金型が通る輪郭の帯を塗る。角 R のぶん残る所は塗らない
       ctx.beginPath();
-      ctx.rect(ax, ay, bx - ax, by - ay);
-      ctx.rect(cx, cy, dx - cx, dy - cy);
-      ctx.fill('evenodd');
-      ctx.strokeRect(ax, ay, bx - ax, by - ay);
-      ctx.strokeRect(cx, cy, dx - cx, dy - cy);
+      for (const q of f13Strips(h)) {
+        const [px, py] = toScreen(q.x0, q.y1), [qx, qy] = toScreen(q.x1, q.y0);
+        ctx.rect(px, py, qx - px, qy - py);
+      }
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.stroke();
     } else {
       ctx.fillRect(ax, ay, bx - ax, by - ay);
       ctx.strokeRect(ax, ay, bx - ax, by - ay);
