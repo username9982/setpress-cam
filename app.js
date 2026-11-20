@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.11.0';
+const APP_VERSION = '0.12.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -360,26 +360,16 @@ function drawSheetDim(d) {
   if (k == null) return;
   const o = info.outers[k].origin;
   const s = isSel('dim', d.id);
-  const col = s ? COLOR.selected : COLOR.dim;
   // 同じ向きの板の原点からの寸法を、外へ段にして並べる
-  const n = doc.dims.filter((q) => q.kind === 'sheet' && q.axis === d.axis && q.id < d.id).length;
+  const n = doc.dims.filter((q) => q.kind === 'sheet' && q.axis === d.axis &&
+    (Math.abs(q.value) < Math.abs(d.value) || (q.value === d.value && q.id < d.id))).length;  // 短いものを内側
   const gap = (22 + 26 * n) / view.scale;
   const h = doc.sheet.h;
   let p1, p2, e;
   if (d.axis === 'x') { p1 = [0, h + gap]; p2 = [o.x, h + gap]; e = [o.x, o.y]; }
   else { p1 = [-gap, h]; p2 = [-gap, o.y]; e = [o.x, o.y]; }
   const S = (q) => toScreen(q[0], q[1]);
-  const [s1, s2, f] = [S(p1), S(p2), S(e)];
-  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.2;
-  ctx.setLineDash([2, 3]);
-  ctx.beginPath(); ctx.moveTo(f[0], f[1]); ctx.lineTo(s2[0], s2[1]);
-  const c0 = S([0, h]);
-  ctx.moveTo(c0[0], c0[1]); ctx.lineTo(s1[0], s1[1]);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.beginPath(); ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke();
-  for (const [p, q] of [[s1, s2], [s2, s1]]) arrow(p, q);
-  dimLabel(d, s1, s2, s, col);
+  dimension(d, S(p1), S(p2), S([0, h]), S(e), s);
 }
 
 // 原点からの寸法の表示の値（Y は下へ正）
@@ -396,10 +386,23 @@ function layoutDims() {
   if (!pts.length) return [];
   const minY = Math.min(...pts.map((p) => p.y)), maxX = Math.max(...pts.map((p) => p.x));
   const step = 30 / view.scale;
-  const count = { x: 0, y: 0 };
+  // 並べる寸法は、短いものを内側（図形の近く）、長いものを外側にする（寸法線と寸法補助線が交わらないように）
+  // 外側の辺（いちばん下の水平線・いちばん右の垂直線）の長さも、同じ列に並べる
+  const onEdge = (d) => {
+    if (d.kind !== 'len') return false;
+    const l = L(d.refs[0].id);
+    return l.dir === 'h' ? Math.abs(P(l.a).y - minY) < 1e-6 : Math.abs(P(l.a).x - maxX) < 1e-6;
+  };
+  const stacked = (d) => d.kind !== 'sheet' && (d.kind !== 'len' || onEdge(d));
+  const rank = new Map();
+  for (const axis of ['x', 'y']) {
+    doc.dims.filter((d) => d.axis === axis && stacked(d))
+      .sort((p, q) => Math.abs(p.value) - Math.abs(q.value) || p.id - q.id)
+      .forEach((d, i) => rank.set(d.id, i + 1));
+  }
   return doc.dims.map((d) => {
     if (d.kind === 'sheet') return null;  // 板の外側に別に描く
-    if (d.kind === 'len') {
+    if (d.kind === 'len' && !rank.has(d.id)) {
       const l = L(d.refs[0].id);
       const across = l.dir === 'h' ? 'y' : 'x';
       const here = P(l.a)[across];
@@ -414,8 +417,8 @@ function layoutDims() {
       const out = side > 0 ? -1 : 1;  // つながった線が上（右）なら下（左）に置く
       return here + out * 22 / view.scale;
     }
-    count[d.axis] += 1;
-    return d.axis === 'x' ? minY - (16 / view.scale + step * count.x) : maxX + (16 / view.scale + step * count.y);
+    const n = rank.get(d.id);
+    return d.axis === 'x' ? minY - (16 / view.scale + step * n) : maxX + (16 / view.scale + step * n);
   });
 }
 
@@ -426,16 +429,13 @@ function refNear(r, across, level) {
   return Math.abs(a - level) < Math.abs(b - level) ? a : b;
 }
 
-// 寸法線: axis の方向の距離を、要素から引き出した補助線と数字で描く
+// 寸法線: axis の方向の距離を、要素から引き出した寸法補助線と数字で描く
 function drawDim(d, level) {
-  const s = isSel('dim', d.id);
-  const col = s ? COLOR.selected : COLOR.dim;
   const ax = d.axis;
   const across = ax === 'x' ? 'y' : 'x';
   const va = P(d.a)[ax], vb = P(d.b)[ax];
   const refsAB = d.kind === 'len' ? [d.refs[0], d.refs[0]] : d.refs;
   const ea = refNear(refsAB[0], across, level), eb = refNear(refsAB[1], across, level);
-  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.2;
   let p1, p2, e1, e2;
   if (ax === 'x') {
     p1 = [va, level]; p2 = [vb, level]; e1 = [va, ea]; e2 = [vb, eb];
@@ -443,40 +443,87 @@ function drawDim(d, level) {
     p1 = [level, va]; p2 = [level, vb]; e1 = [ea, va]; e2 = [eb, vb];
   }
   const S = (q) => toScreen(q[0], q[1]);
-  const [s1, s2, f1, f2] = [S(p1), S(p2), S(e1), S(e2)];
-  ctx.setLineDash([2, 3]);
-  ctx.beginPath(); ctx.moveTo(f1[0], f1[1]); ctx.lineTo(s1[0], s1[1]); ctx.moveTo(f2[0], f2[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.beginPath(); ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke();
-  for (const [p, q] of [[s1, s2], [s2, s1]]) arrow(p, q);
-  dimLabel(d, s1, s2, s, col);
+  dimension(d, S(p1), S(p2), S(e1), S(e2), isSel('dim', d.id));
 }
-// 寸法の数字（白い箱）。タップ用に位置を覚える
-function dimLabel(d, s1, s2, s, col) {
+
+// JIS B 0001（機械製図）の寸法記入にならって描く（画面の座標で受け取る）。
+// - 寸法線・寸法補助線は細い実線。寸法補助線は形体からわずかにすき間をあけ、寸法線を少し越えるまで引く
+// - 端末記号は塗りつぶした矢印（開き角 約 30°）。間がせまいときは矢印を外側から当てる
+// - 寸法数値は寸法線の上側に、寸法線に沿って書く。縦の寸法は図面の右側から読む向き（左へ 90° 回して寸法線の左側）
+// - 単位 mm は書かない。数値を枠で囲まない（枠は理論的に正確な寸法の記号になるため）
+// s1, s2: 寸法線の両端。f1, f2: 寸法補助線を引き出す形体の点（寸法線上と同じなら引かない）
+const DIM = { gap: 3, over: 6, arrowL: 9, arrowW: 2.4, textGap: 3, font: '13px sans-serif' };
+function dimension(d, s1, s2, f1, f2, selected) {
+  const col = selected ? COLOR.selected : COLOR.dim;
+  ctx.save();
+  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  // 寸法補助線
+  ctx.beginPath();
+  for (const [f, sp] of [[f1, s1], [f2, s2]]) {
+    const len = Math.hypot(sp[0] - f[0], sp[1] - f[1]);
+    if (len < DIM.gap + 1) continue;
+    const ux = (sp[0] - f[0]) / len, uy = (sp[1] - f[1]) / len;
+    ctx.moveTo(f[0] + ux * DIM.gap, f[1] + uy * DIM.gap);
+    ctx.lineTo(sp[0] + ux * DIM.over, sp[1] + uy * DIM.over);
+  }
+  ctx.stroke();
+  // 寸法線と矢印
+  const len = Math.hypot(s2[0] - s1[0], s2[1] - s1[1]);
+  const vertical = Math.abs(s2[0] - s1[0]) < Math.abs(s2[1] - s1[1]);
+  ctx.font = DIM.font;
   const text = `${round(dimShown(d))}`;
-  ctx.font = 'bold 13px sans-serif';
-  const tw = ctx.measureText(text).width + 10, th = 20;
-  const cx = (s1[0] + s2[0]) / 2, cy = (s1[1] + s2[1]) / 2;
-  const box = { id: d.id, x: cx - tw / 2, y: cy - th / 2, w: tw, h: th };
-  ctx.fillStyle = s ? '#fff4e0' : '#ffffff';
-  ctx.fillRect(box.x, box.y, box.w, box.h);
-  ctx.strokeRect(box.x, box.y, box.w, box.h);
-  ctx.fillStyle = col;
+  const tw = ctx.measureText(text).width, th = 13;
+  const narrow = len < DIM.arrowL * 2 + 4;
+  let ux = 1, uy = 0;
+  if (len > 0.01) { ux = (s2[0] - s1[0]) / len; uy = (s2[1] - s1[1]) / len; } else if (vertical) { ux = 0; uy = 1; }
+  ctx.beginPath();
+  if (narrow) {
+    // 外側から矢印を当て、寸法線を両側へ延ばす
+    const ext = DIM.arrowL + 8;
+    ctx.moveTo(s1[0] - ux * ext, s1[1] - uy * ext); ctx.lineTo(s2[0] + ux * ext, s2[1] + uy * ext);
+  } else {
+    ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s2[0], s2[1]);
+  }
+  ctx.stroke();
+  if (len > 0.01) {
+    if (narrow) { arrowTip(s1, -ux, -uy); arrowTip(s2, ux, uy); } else { arrowTip(s1, ux, uy); arrowTip(s2, -ux, -uy); }
+  }
+  // 寸法数値: 寸法線の中央の上側。入らないときは寸法線の先（右・上）の外に出す
+  let cx = (s1[0] + s2[0]) / 2, cy = (s1[1] + s2[1]) / 2;
+  const room = len - 2 * DIM.arrowL - 4;
+  if (tw > room) {
+    const far = vertical ? (s1[1] < s2[1] ? s1 : s2) : (s1[0] > s2[0] ? s1 : s2);
+    const off = (narrow ? DIM.arrowL + 8 : 0) + tw / 2 + 4;
+    if (vertical) { cy = far[1] - off; } else { cx = far[0] + off; }
+  }
+  let box;
+  if (vertical) {
+    // 左へ 90° 回す（図面の右側から読む向き）。寸法線の左側に置く
+    box = { id: d.id, x: cx - DIM.textGap - th - 2, y: cy - tw / 2 - 2, w: th + 4, h: tw + 4 };
+  } else {
+    box = { id: d.id, x: cx - tw / 2 - 2, y: cy - DIM.textGap - th - 2, w: tw + 4, h: th + 4 };
+  }
+  if (selected) { ctx.fillStyle = 'rgba(232, 137, 12, 0.18)'; ctx.fillRect(box.x, box.y, box.w, box.h); ctx.fillStyle = col; }
   ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, cx, cy + 1);
-  ctx.textBaseline = 'alphabetic';
-  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  if (vertical) {
+    ctx.translate(cx - DIM.textGap, cy);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, 0, -th / 2 + 1);
+  } else {
+    ctx.fillText(text, cx, cy - DIM.textGap);
+  }
+  ctx.restore();
   dimHits.push(box);
 }
-function arrow(p, q) {
-  const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
-  if (len < 12) return;
-  const ux = (q[0] - p[0]) / len, uy = (q[1] - p[1]) / len;
+// 矢印（先端 p、向き (ux, uy) へ開く）
+function arrowTip(p, ux, uy) {
   ctx.beginPath();
   ctx.moveTo(p[0], p[1]);
-  ctx.lineTo(p[0] + ux * 8 - uy * 3.5, p[1] + uy * 8 + ux * 3.5);
-  ctx.lineTo(p[0] + ux * 8 + uy * 3.5, p[1] + uy * 8 - ux * 3.5);
+  ctx.lineTo(p[0] + ux * DIM.arrowL - uy * DIM.arrowW, p[1] + uy * DIM.arrowL + ux * DIM.arrowW);
+  ctx.lineTo(p[0] + ux * DIM.arrowL + uy * DIM.arrowW, p[1] + uy * DIM.arrowL - ux * DIM.arrowW);
   ctx.closePath();
   ctx.fill();
 }
