@@ -477,13 +477,49 @@ const Geo = (() => {
     }
     return r;
   }
+  // 水平・垂直の辺だけの多角形を、長方形 box {x0, y0, x1, y1} で切り取る（Sutherland–Hodgman）。
+  // 同じ点・一直線に並んだ点は除く。面積がなければ null
+  function clipToRect(poly, box) {
+    let pts = poly.map((v) => ({ x: v.x, y: v.y }));
+    const sides = [
+      [(v) => v.x >= box.x0 - EPS, (a, b) => ({ x: box.x0, y: a.y + (b.y - a.y) * (box.x0 - a.x) / (b.x - a.x) })],
+      [(v) => v.x <= box.x1 + EPS, (a, b) => ({ x: box.x1, y: a.y + (b.y - a.y) * (box.x1 - a.x) / (b.x - a.x) })],
+      [(v) => v.y >= box.y0 - EPS, (a, b) => ({ x: a.x + (b.x - a.x) * (box.y0 - a.y) / (b.y - a.y), y: box.y0 })],
+      [(v) => v.y <= box.y1 + EPS, (a, b) => ({ x: a.x + (b.x - a.x) * (box.y1 - a.y) / (b.y - a.y), y: box.y1 })],
+    ];
+    for (const [isIn, cut] of sides) {
+      const out = [];
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[(i + pts.length - 1) % pts.length], b = pts[i];
+        if (isIn(b)) { if (!isIn(a)) out.push(cut(a, b)); out.push(b); }
+        else if (isIn(a)) out.push(cut(a, b));
+      }
+      pts = out;
+      if (!pts.length) return null;
+    }
+    pts = pts.map((v) => ({ x: r3(v.x), y: r3(v.y) }));
+    let changed = true;
+    while (changed && pts.length >= 3) {
+      changed = false;
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[(i + pts.length - 1) % pts.length], b = pts[i], c = pts[(i + 1) % pts.length];
+        const same = Math.abs(a.x - b.x) < EPS && Math.abs(a.y - b.y) < EPS;
+        const line = (Math.abs(a.x - b.x) < EPS && Math.abs(b.x - c.x) < EPS) || (Math.abs(a.y - b.y) < EPS && Math.abs(b.y - c.y) < EPS);
+        if (same || line) { pts.splice(i, 1); changed = true; break; }
+      }
+    }
+    if (pts.length < 4) return null;
+    let area = 0;
+    for (let i = 0; i < pts.length; i++) { const a = pts[i], b = pts[(i + 1) % pts.length]; area += a.x * b.y - b.x * a.y; }
+    return Math.abs(area) > EPS ? pts : null;
+  }
   // 多角形を、重ならずに接する長方形に分ける。水平の帯と垂直の帯の 2 通りを返す
   function rectPartitions(poly) {
     return [slabs(poly, 'y'), slabs(poly, 'x')];
   }
 
   return {
-    EPS, AXES, r3, rectGrow, rectPartitions, rectInside, pointById, lineById, analyze, build, addDim, setDimValue, moveItems,
+    EPS, AXES, r3, rectGrow, rectPartitions, rectInside, clipToRect, pointById, lineById, analyze, build, addDim, setDimValue, moveItems,
     strokeToPolyline, cleanPolyline, deleteLines, closedShapes, classifyShapes, inside, overlaps,
   };
 })();
