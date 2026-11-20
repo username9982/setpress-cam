@@ -225,35 +225,39 @@ const Geo = (() => {
   }
 
   // ---- なぞった線を水平・垂直の折れ線にする ----
-  // pts: [{x, y}]（mm）。T: 曲がったと見なすずれ（mm）。戻り値: 頂点の列（2 つ以上）か null
+  // pts: [{x, y}]（mm）。T: 曲がったと見なす指の移動量（mm）。戻り値: 頂点の列（2 つ以上）か null
+  //
+  // 最初の線の向きは、書き始めから指までの角度で決める（45° より横なら水平、縦なら垂直）。
+  // 線の先 K は、いまの線の向きに沿って（45° 以内で）指が進むあいだ指についていく。
+  // K から指への向きが 45° を超えて横にそれ、T 以上離れたら、K を角にして 90° 曲げる。
+  // ゆるやかになぞっている間は 1 本の線のまま、カクンと曲げたところで曲がる。
   function strokeToPolyline(pts, T) {
     if (pts.length < 2) return null;
     const verts = [{ x: pts[0].x, y: pts[0].y }];
-    let dir = null, c = 0, stable = null;
+    let dir = null, c = 0, K = null;
     for (const p of pts) {
       const s = verts[verts.length - 1];
       if (!dir) {
         const dx = p.x - s.x, dy = p.y - s.y;
-        if (Math.max(Math.abs(dx), Math.abs(dy)) < T) continue;
+        if (Math.hypot(dx, dy) < T) continue;
         dir = Math.abs(dx) >= Math.abs(dy) ? 'h' : 'v';
         c = dir === 'h' ? s.y : s.x;
-        stable = p;
+        K = p;
         continue;
       }
-      const dev = dir === 'h' ? p.y - c : p.x - c;
-      if (Math.abs(dev) <= T / 2) { stable = p; continue; }
-      if (Math.abs(dev) > T) {
-        // 曲がった: ずれ始める前の位置を角にする
-        const corner = dir === 'h' ? { x: stable.x, y: c } : { x: c, y: stable.y };
-        verts.push(corner);
-        dir = dir === 'h' ? 'v' : 'h';
-        c = dir === 'h' ? corner.y : corner.x;
-        stable = p;
-      }
+      const vx = p.x - K.x, vy = p.y - K.y;
+      const along = dir === 'h' ? vx : vy, across = dir === 'h' ? vy : vx;
+      if (Math.abs(across) <= Math.abs(along)) { K = p; continue; }  // 線の向きに沿って進んでいる
+      if (Math.hypot(vx, vy) < T) continue;  // まだ曲がったとは見なさない
+      // 曲がった: K を角にする
+      const corner = dir === 'h' ? { x: K.x, y: c } : { x: c, y: K.y };
+      verts.push(corner);
+      dir = dir === 'h' ? 'v' : 'h';
+      c = dir === 'h' ? corner.y : corner.x;
+      K = p;
     }
     if (!dir) return null;
-    const last = pts[pts.length - 1];
-    verts.push(dir === 'h' ? { x: last.x, y: c } : { x: c, y: last.y });
+    verts.push(dir === 'h' ? { x: K.x, y: c } : { x: c, y: K.y });
     return verts;
   }
 
