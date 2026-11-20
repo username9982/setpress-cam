@@ -124,13 +124,6 @@ const Geo = (() => {
     return { uf, shapes, outers, owner, outerAt, anchors, fixedAxis, fixedPoint, fixedLine };
   }
 
-  // 方向 axis で v と同じまとまりの点をまとめて delta 動かす
-  function shiftGroup(doc, uf, axis, v, delta) {
-    if (Math.abs(delta) < EPS) return;
-    const root = uf.find(v);
-    for (const p of doc.points) if (uf.find(p.id) === root) p[axis] = r3(p[axis] + delta);
-  }
-
   // 寸法の値に合わせて、動かす側をまるごと動かす。
   // 動かす側: 原点の基準とつながっていない側（両方つながっていないときは prefer の側）。
   // 動かす範囲: 動かす端と、関係（線・寸法）でつながった点に加え、その先に「つながっている線」も
@@ -195,53 +188,34 @@ const Geo = (() => {
     return null;
   }
 
-  // 点を (dx, dy) 動かす。ids の点のまとまりをまとめて動かす。
-  // X・Y とも原点の基準とつながった点（外形の左上の角など）をつかんだときは、
-  // その外形（穴・切り欠き・つながった線を含む）をまるごと動かす。片方だけ基準とつながった方向には動かない。
-  function moveGroups(doc, ids, dx, dy) {
-    const info = analyze(doc);
-    const whole = new Set();
-    for (const id of ids) {
-      const k = info.owner.get(id);
-      if (k == null) continue;
-      if (AXES.every((axis) => info.anchors[axis].has(info.uf[axis].find(id)))) whole.add(k);
-    }
-    const moved = new Set();
-    for (const p of doc.points) {
-      if (whole.has(info.owner.get(p.id))) { p.x = r3(p.x + dx); p.y = r3(p.y + dy); moved.add(p.id); }
-    }
-    for (const axis of AXES) {
-      const delta = axis === 'x' ? dx : dy;
-      const uf = info.uf[axis];
-      const done = new Set();
-      for (const id of ids) {
-        if (moved.has(id)) continue;
-        const root = uf.find(id);
-        if (done.has(root) || info.anchors[axis].has(root)) continue;
-        done.add(root);
-        shiftGroup(doc, uf, axis, id, delta);
-      }
-    }
-  }
-
-  // 線を平行に delta 動かす（水平線は Y、垂直線は X）。
-  // 線と、線・寸法で同じ位置に決まっているもの（その方向のまとまり）をまとめて動かすので、寸法は保たれる。
+  // 選んだ線・点をまとめて (dx, dy) 動かす。items: [{t:'line'|'point', id}]
+  // 線は平行にだけ動く（水平線は dy、垂直線は dx）。点は X・Y とも動く。
+  // 動かすのは、線・寸法で同じ位置に決まっているもの（方向ごとのまとまり）ごとなので、入れた寸法は保たれる。
   // 両端につながった線は伸び縮みし、反対側まで動かせば向きが逆になる。
   // 長さが 0 になる線ができるときは動かさず false を返す。
-  function moveLine(doc, lineId, delta) {
-    const l = lineById(doc, lineId);
-    if (!l) return false;
-    const axis = l.dir === 'h' ? 'y' : 'x';
-    const uf = build(doc, axis);
-    const root = uf.find(l.a);
-    const moved = doc.points.filter((p) => uf.find(p.id) === root);
-    const old = moved.map((p) => p[axis]);
-    for (const p of moved) p[axis] = r3(p[axis] + delta);
+  function moveItems(doc, items, dx, dy) {
+    const roots = { x: new Set(), y: new Set() };
+    const uf = { x: build(doc, 'x'), y: build(doc, 'y') };
+    for (const it of items) {
+      if (it.t === 'line') {
+        const l = lineById(doc, it.id);
+        if (!l) continue;
+        const axis = l.dir === 'h' ? 'y' : 'x';
+        roots[axis].add(uf[axis].find(l.a));
+      } else if (it.t === 'point' && pointById(doc, it.id)) {
+        for (const axis of AXES) roots[axis].add(uf[axis].find(it.id));
+      }
+    }
+    const old = doc.points.map((p) => ({ x: p.x, y: p.y }));
+    for (const p of doc.points) {
+      if (roots.x.has(uf.x.find(p.id))) p.x = r3(p.x + dx);
+      if (roots.y.has(uf.y.find(p.id))) p.y = r3(p.y + dy);
+    }
     const zero = doc.lines.some((m) => {
       const a = pointById(doc, m.a), b = pointById(doc, m.b);
       return Math.abs(a.x - b.x) < EPS && Math.abs(a.y - b.y) < EPS;
     });
-    if (zero) moved.forEach((p, i) => { p[axis] = old[i]; });
+    if (zero) doc.points.forEach((p, i) => { p.x = old[i].x; p.y = old[i].y; });
     return !zero;
   }
 
@@ -434,7 +408,7 @@ const Geo = (() => {
   }
 
   return {
-    EPS, AXES, r3, pointById, lineById, analyze, build, addDim, setDimValue, moveGroups, moveLine,
+    EPS, AXES, r3, pointById, lineById, analyze, build, addDim, setDimValue, moveItems,
     strokeToPolyline, cleanPolyline, deleteLines, closedShapes, classifyShapes, inside, overlaps,
   };
 })();

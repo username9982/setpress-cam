@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.8.1';
+const APP_VERSION = '0.9.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 
@@ -63,7 +63,7 @@ function toolText(t) {
 function programText(p) { return p == null ? 'O----' : 'O' + String(p).padStart(4, '0'); }
 
 let doc = newDoc();
-let sel = [];  // 選んだ要素 [{t:'point'|'line'|'dim', id}]（2 つまで）
+let sel = [];  // 選んだ要素 [{t:'point'|'line'|'dim', id}]（寸法では 2 つまで、移動ではいくつでも）
 let dirty = false;
 let info = Geo.analyze(doc);  // 確定しているか（図形を変えるたびに作り直す）
 let shapes = [];  // 閉じた図形 [{poly, area, role:'outer'|'hole'|'notch', parent, outer}]（info.shapes と同じ）
@@ -102,7 +102,6 @@ const D = (id) => doc.dims.find((d) => d.id === id);
 // ワーク原点は外形ごとに、外形を囲む四角の左上。座標は原点から右へ X+、下へ Y+ で表す。
 // どの外形にも属さないものは、板の左上から測る。
 const sheetTopLeft = () => ({ x: 0, y: doc.sheet.h });
-function originForPoint(pid) { const k = info.owner.get(pid); return k == null ? sheetTopLeft() : info.outers[k].origin; }
 function originAt(x, y) { const k = info.outerAt(x, y); return k == null ? sheetTopLeft() : info.outers[k].origin; }
 function rel(o, x, y) { return { x: round(x - o.x), y: round(o.y - y) }; }
 function elemExists(s) { return s.t === 'point' ? !!P(s.id) : s.t === 'line' ? !!L(s.id) : !!D(s.id); }
@@ -588,14 +587,15 @@ canvas.addEventListener('pointermove', (e) => {
     drag.raw.push({ x: wx, y: wy });
     draw();
   } else if (drag.kind === 'press') {
-    // 「移動」で点か線を押したまま 8px 動いたら、動かし始める
+    // 「移動」で点か線を押したまま 8px 動いたら、選んだものをまとめて動かし始める。
+    // 選んでいないものをつかんだときは、それだけを選び直して動かす
     const h = drag.hit;
     if (mode === 'move' && h && h.t !== 'dim' && Math.hypot(pos[0] - drag.start[0], pos[1] - drag.start[1]) > 8) {
+      if (!isSel(h.t, h.id)) sel = [h];
       snapshot();
-      // 線は平行に動かす（両端につながった線が伸び縮みする）。点はまとまりごと動かす
       drag = {
-        kind: 'move', ids: h.t === 'point' ? [h.id] : [], lineId: h.t === 'line' ? h.id : null,
-        world: drag.world, orig: doc.points.map((p) => ({ ...p })), last: 0,
+        kind: 'move', items: sel.map((q) => ({ ...q })),
+        world: drag.world, orig: doc.points.map((p) => ({ ...p })), last: [0, 0],
       };
     }
   }
@@ -605,20 +605,15 @@ canvas.addEventListener('pointermove', (e) => {
     const s = snapStep();
     const dx = round(Math.round((wx - drag.world[0]) / s) * s);
     const dy = round(Math.round((wy - drag.world[1]) / s) * s);
-    if (drag.lineId != null) {
-      // 長さ 0 の線ができる位置には止めず、その手前の位置のままにする
-      const delta = L(drag.lineId).dir === 'h' ? dy : dx;
-      if (Geo.moveLine(doc, drag.lineId, delta)) drag.last = delta;
-      else Geo.moveLine(doc, drag.lineId, drag.last);
-    } else {
-      Geo.moveGroups(doc, drag.ids, dx, dy);
+    // 長さ 0 の線ができる位置には止めず、動ける方向だけ動かすか、その手前の位置のままにする
+    const [lx, ly] = drag.last;
+    const tries = [[dx, dy], [dx, ly], [lx, dy], [lx, ly]];
+    for (const [tx, ty] of tries) {
+      if (Geo.moveItems(doc, drag.items, tx, ty)) { drag.last = [tx, ty]; break; }
     }
     refresh();  // 外形の原点や塗りも動かしながら描き直す
-    if (drag.lineId != null) {
-      const l = L(drag.lineId);
-      const r = rel(originForPoint(l.a), P(l.a).x, P(l.a).y);
-      $('st-pos').textContent = l.dir === 'h' ? `線 ${lName(l.id)}  Y ${r.y}` : `線 ${lName(l.id)}  X ${r.x}`;
-    }
+    // 画面の Y は上が正なので、表示は下へ正にそろえる
+    $('st-pos').textContent = `移動  X ${round(drag.last[0])}  Y ${round(-drag.last[1])}`;
   }
 });
 
@@ -638,6 +633,7 @@ function endPointer(e) {
     draw();
   } else if (d.kind === 'press') {
     if (mode === 'dim') tapSelect(d.hit);
+    else if (mode === 'move') tapSelectMany(d.hit);
   } else if (d.kind === 'move') {
     const movedAny = doc.points.some((p, i) => p.x !== d.orig[i].x || p.y !== d.orig[i].y);
     if (movedAny) changed(); else { undoStack.pop(); draw(); }
@@ -647,6 +643,15 @@ canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
 
 // タップで選ぶ: 同じものは外す、2 つまで足す、3 つ目は選び直し。寸法は 1 つだけ選ぶ。
+// 「移動」ではいくつでも選べる（タップで足す・外す）。寸法の数字は選ばない。何もない所で全部外す。
+function tapSelectMany(hit) {
+  if (!hit) sel = [];
+  else if (hit.t === 'dim') return;
+  else if (isSel(hit.t, hit.id)) sel = sel.filter((s) => !(s.t === hit.t && s.id === hit.id));
+  else sel = [...sel, hit];
+  updateUi();
+  draw();
+}
 function tapSelect(hit) {
   if (!hit) sel = [];
   else if (isSel(hit.t, hit.id)) sel = sel.filter((s) => !(s.t === hit.t && s.id === hit.id));
@@ -674,11 +679,11 @@ document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
 
 // ---- 画面の部品 ----
-// 作図: なぞって線を描く。寸法: 要素をタップして寸法を入れる。移動: 線・点をつかんで動かす。
-// 選んだものは「寸法」でだけ使うので、ほかに切り替えたら選択を解く。
+// 作図: なぞって線を描く。寸法: 要素をタップして寸法を入れる。移動: 線・点を選んでつかみ、まとめて動かす。
+// 寸法は 2 つまで選んで寸法を入れ、移動はいくつでも選んでまとめて動かす。
 function setMode(m) {
   mode = m;
-  if (m !== 'dim' && sel.length) { sel = []; updateUi(); draw(); }
+  if (sel.length) { sel = []; updateUi(); draw(); }  // 寸法と移動では選び方が違うので、切り替えたら外す
   document.querySelectorAll('button.mode').forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
   canvas.dataset.mode = m;
 }
@@ -775,7 +780,7 @@ function dimOptions() {
 // 欄を作り直す（選んだものが変わったとき・図形が変わったとき）
 let propsSig = '';
 function updateProps() {
-  const opt = dimOptions();
+  const opt = mode === 'dim' ? dimOptions() : null;  // 寸法の欄は「寸法」のときだけ
   const box = $('props');
   box.hidden = !opt;
   if (!opt) { propsSig = ''; return; }
