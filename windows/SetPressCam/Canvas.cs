@@ -165,6 +165,7 @@ namespace SetPressCam
             }
             DrawSheetOrigin(g);
             DrawFills(g);
+            DrawCopies(g);
             if (ed.Mode == "layout") DrawLayout(g);
             dimHits.Clear();
             originHits.Clear();
@@ -453,6 +454,40 @@ namespace SetPressCam
         }
 
         // 割付の表示: 選んだ外形を太く縁取り、抜く長方形（破線）と、開始点（左上）に置く金型（塗り）を描く
+        // F23 の多数個取りのプレビュー: 2 個目からの位置に、ワークの線と抜く範囲を点線で描く（板からはみ出すものは赤）
+        static readonly Font F11 = new Font("Yu Gothic UI", 11f, FontStyle.Regular, GraphicsUnit.Pixel);
+        void DrawCopies(Graphics g)
+        {
+            var doc = ed.Doc;
+            foreach (var lay in doc.Layouts)
+            {
+                var k = ed.Owner(lay.Work);
+                if (k == null || lay.Hits.Count == 0) continue;
+                var f = ed.F23Of(lay);
+                if (f.Nx * f.Ny <= 1) continue;
+                var ls = doc.Lines.Where(l => ed.Owner(l.A) == k && ed.Owner(l.B) == k).ToList();
+                for (int j = 0; j < f.Ny; j++)
+                    for (int i = 0; i < f.Nx; i++)
+                    {
+                        if (i == 0 && j == 0) continue;
+                        double dx = i * f.Px, dy = -j * f.Py;  // Y は下へ並べる
+                        var r = ScreenRect(f.X0 + dx, f.Y0 + dy, f.X1 + dx, f.Y1 + dy);
+                        bool o = f.X0 + dx < -1e-6 || f.X1 + dx > doc.Sheet.W + 1e-6 || f.Y0 + dy < -1e-6 || f.Y1 + dy > doc.Sheet.H + 1e-6;
+                        using (var b = new SolidBrush(o ? Color.FromArgb(26, 200, 60, 40) : Color.FromArgb(18, 47, 128, 209))) g.FillRectangle(b, r);
+                        using (var p = new Pen(o ? Color.FromArgb(179, 200, 60, 40) : Color.FromArgb(115, 47, 128, 209), 1f) { DashPattern = new[] { 6f, 4f } })
+                            g.DrawRectangle(p, r.X, r.Y, r.Width, r.Height);
+                        var col = o ? Color.FromArgb(217, 200, 60, 40) : Color.FromArgb(204, 47, 128, 209);
+                        using (var p = new Pen(col, 1.5f) { DashPattern = new[] { 6 / 1.5f, 4 / 1.5f } })
+                            foreach (var l in ls)
+                            {
+                                var a = ed.P(l.A); var c = ed.P(l.B);
+                                g.DrawLine(p, ToScreen(a.X + dx, a.Y + dy), ToScreen(c.X + dx, c.Y + dy));
+                            }
+                        using (var b = new SolidBrush(col)) g.DrawString("S" + (k + 1) + "-" + (j * f.Nx + i + 1), F11, b, r.X + 3, r.Y + 2, TYPO);
+                    }
+            }
+        }
+
         void DrawLayout(Graphics g)
         {
             var k = ed.LayoutWork;

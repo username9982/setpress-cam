@@ -345,9 +345,14 @@ namespace SetPressCam
             Snapshot();
             int key = WorkKey(k);
             var before = WorkOrigin(k);
+            var prev = LayoutOf(k);  // F23 のピッチ・列数は割り付け直しても保つ
             Doc.Layouts = Doc.Layouts.Where(q => Owner(q.Work) != k).ToList();
             var og = Info.Outers[k].Origin;
-            Doc.Layouts.Add(new Layout { Work = key, Src = HoleSrc(k), Hits = hits, Warn = warn, Org = new Org { X = og.X, Y = og.Y } });
+            Doc.Layouts.Add(new Layout
+            {
+                Work = key, Src = HoleSrc(k), Hits = hits, Warn = warn, Org = new Org { X = og.X, Y = og.Y },
+                Nx = prev?.Nx, Ny = prev?.Ny, Px = prev?.Px, Py = prev?.Py,
+            });
             KeepSheetDims(k, before);
             LayoutHit = null;
             Changed();
@@ -499,11 +504,59 @@ namespace SetPressCam
             return f13 != null ? f13.Mj ?? 0 : Doc.Mj;
         }
 
+        // ---- F23（多数個取り）: ピッチと列数 ----
+        // ピッチは、書き換えていなければ 金型が抜く形を囲む四角 + 10 mm。列数は 1〜99（X は右へ、Y は下へ並べる）
+        public const int F23_MAX = 99;
+
+        public class F23Info { public double X0, Y0, X1, Y1, Px, Py; public int Nx, Ny; }
+
+        public F23Info F23Of(Layout lay)
+        {
+            var hs = HitsOf(lay);
+            var f = new F23Info();
+            if (hs.Count > 0) { f.X0 = hs.Min(h => h.X0); f.X1 = hs.Max(h => h.X1); f.Y0 = hs.Min(h => h.Y0); f.Y1 = hs.Max(h => h.Y1); }
+            f.Px = lay.Px ?? Round(f.X1 - f.X0 + 10);
+            f.Py = lay.Py ?? Round(f.Y1 - f.Y0 + 10);
+            f.Nx = lay.Nx ?? 1;
+            f.Ny = lay.Ny ?? 1;
+            return f;
+        }
+
+        /// <summary>コードの区画で F23 の値を書き換えたとき。列数は空なら 1、ピッチは空なら自動に戻す。</summary>
+        public void SetF23(int work, string field, string text)
+        {
+            var lay = Doc.Layouts.Find(q => q.Work == work);
+            if (lay == null) return;
+            string t = (text ?? "").Trim();
+            double n = 0;
+            bool num = t == "" || double.TryParse(t, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out n);
+            if (!num || double.IsNaN(n) || double.IsInfinity(n)) return;
+            if (field == "nx" || field == "ny")
+            {
+                int v = t == "" ? 1 : (int)Math.Min(Math.Max(Math.Floor(n + 0.5), 1), F23_MAX);  // JS の Math.round と同じ
+                int? nv = v == 1 ? (int?)null : v;
+                int? cur = field == "nx" ? lay.Nx : lay.Ny;
+                if (cur == nv) return;
+                Snapshot();
+                if (field == "nx") lay.Nx = nv; else lay.Ny = nv;
+            }
+            else
+            {
+                double? nv = t == "" ? (double?)null : Round(Math.Min(Math.Max(n, 0.1), 5000));
+                double? cur = field == "px" ? lay.Px : lay.Py;
+                if (cur == nv) return;
+                Snapshot();
+                if (field == "px") lay.Px = nv; else lay.Py = nv;
+            }
+            Changed();
+        }
+
         // ---- コード: 機械に手で打ち込むデータとコメントだけを並べる ----
         public List<CodeLine> GenCode(string version)
         {
             var lines = new List<CodeLine>();
             Action<string, string, bool> add = (text, key, comment) => lines.Add(new CodeLine { Text = text, Key = key, Comment = comment });
+            Action<string, CodeEdit> addEdit = (text, e) => lines.Add(new CodeLine { Text = text, Edit = e });
             add("; セットプレス CAM v" + version, null, true);
             add("; 図面 " + (Doc.Name != "" ? Doc.Name : "名前なし") + "  板 " + Fmt(Doc.Sheet.W) + " x " + Fmt(Doc.Sheet.H) + " mm", null, true);
             add("; 板厚 " + (Doc.Sheet.T != null ? Fmt(Doc.Sheet.T.Value) + " mm" : "未設定"), null, true);
@@ -522,9 +575,13 @@ namespace SetPressCam
                 add("; S" + (k + 1) + " 割付  T → F100〜F110 でマクロに登録 → F23 で配置。F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法", null, true);
                 if (lay.Src != HoleSrc(k.Value)) add("; ※ 割付のあとで図形が変わりました。もう一度自動割付してください", null, true);
                 if (hs.Count == 0) { add("; 抜く所がありません", null, true); continue; }
-                // F23 のピッチ: 金型が抜く形を囲む四角 + 10 mm（多数個取りの間隔）
-                double bw = hs.Max(q => q.X1) - hs.Min(q => q.X0);
-                double bh = hs.Max(q => q.Y1) - hs.Min(q => q.Y0);
+                // F23 のピッチ（書き換えていなければ 金型が抜く形を囲む四角 + 10 mm）と列数
+                var f = F23Of(lay);
+                if (f.X0 < -1e-6 || f.Y1 > Doc.Sheet.H + 1e-6 || f.X1 + (f.Nx - 1) * f.Px > Doc.Sheet.W + 1e-6 || f.Y0 - (f.Ny - 1) * f.Py < -1e-6)
+                    add("; ※ 多数個取りの並びが板からはみ出します", null, true);
+                if ((f.Nx > 1 && f.Px < f.X1 - f.X0 - 1e-6) || (f.Ny > 1 && f.Py < f.Y1 - f.Y0 - 1e-6))
+                    add("; ※ ピッチが抜く形より小さく、となりと重なります", null, true);
+                bool pitchAuto = lay.Px == null && lay.Py == null;
                 Func<double, double, string, string, string> xyi = (x, y, note, ind) => ind + ("X" + Fmt(x)).PadRight(8) + ("Y" + Fmt(y)).PadRight(8) + "; " + note;
                 Func<double, double, string, string> xy = (x, y, note) => xyi(x, y, note, "  ");
                 Func<double, double, string, string> mxy = (x, y, note) => xyi(x, y, note, "    ");
@@ -569,12 +626,19 @@ namespace SetPressCam
                     }
                     add("F110", null, false);
                     // F23: マクロ番号 → 板の原点（左上）からワーク原点までの XY → ピッチ XY → 列数 XY
-                    add("; F23: マクロ番号 → 板の原点からワーク原点まで XY → ピッチ XY（抜く形 + 10）→ 列数 XY", null, true);
+                    add("; F23: マクロ番号 → 板の原点からワーク原点まで XY → ピッチ XY（抜く形 + 10）→ 列数 XY（ピッチ・列数は書き換えられる）", null, true);
                     add("F23", null, false);
                     add("  " + mno.ToString().PadRight(16) + "; マクロ番号", null, false);
                     add(xy(SheetPos(k.Value, "x"), SheetPos(k.Value, "y"), "ワーク原点"), null, false);
-                    add(xy(bw + 10, bh + 10, "ピッチ"), null, false);
-                    add("  " + "1".PadRight(8) + "1".PadRight(8) + "; 列数", null, false);
+                    string pnote = pitchAuto ? "ピッチ" : "ピッチ（書き換えた値。空にすると自動）";
+                    addEdit(xy(f.Px, f.Py, pnote), new CodeEdit
+                    {
+                        Work = lay.Work, Fields = new[] { "px", "py" }, Vals = new[] { Fmt(f.Px), Fmt(f.Py) }, Prefix = new[] { "X", "Y" }, Note = pnote,
+                    });
+                    addEdit("  " + f.Nx.ToString().PadRight(8) + f.Ny.ToString().PadRight(8) + "; 列数", new CodeEdit
+                    {
+                        Work = lay.Work, Fields = new[] { "nx", "ny" }, Vals = new[] { f.Nx.ToString(), f.Ny.ToString() }, Prefix = new[] { "", "" }, Note = "列数",
+                    });
                     s0 = s1;
                 }
             }

@@ -87,6 +87,11 @@ namespace SetPressCam
         public List<Hit> Hits { get; set; } = new List<Hit>();
         public List<string> Warn { get; set; } = new List<string>();
         public Org Org { get; set; }
+        // F23（多数個取り）: 列数（無ければ 1）とピッチ（無ければ 抜く形を囲む四角 + 10 mm）
+        public int? Nx { get; set; }
+        public int? Ny { get; set; }
+        public double? Px { get; set; }
+        public double? Py { get; set; }
     }
 
     public class Doc
@@ -182,6 +187,22 @@ namespace SetPressCam
 
         static bool Finite(double v) { return !double.IsNaN(v) && !double.IsInfinity(v); }
         static bool IsInt(double v) { return Finite(v) && Math.Floor(v) == v; }
+
+        /// <summary>F23 の列数（app.js の f23Count）: 2〜99 の整数なら その値、ほかは null（= 1）。</summary>
+        public static int? F23Count(JsonNode n)
+        {
+            double v = n == null ? 0 : Num(n);
+            return IsInt(v) && v > 1 && v <= Editor.F23_MAX ? (int)v : (int?)null;
+        }
+
+        /// <summary>F23 のピッチ（app.js の f23Pitch）: 0 より大きい数なら 5000 までに丸めた値、ほかは null（= 自動）。</summary>
+        public static double? F23Pitch(JsonNode n)
+        {
+            if (n == null) return null;
+            if (n is JsonValue jv && jv.TryGetValue(out string s) && s == "") return null;
+            double v = Num(n);
+            return Finite(v) && v > 0 ? Js.R3(Math.Min(v, 5000)) : (double?)null;
+        }
 
         /// <summary>0 より大きい数なら丸めた値、そうでなければ null（app.js の posNum）。</summary>
         public static double? PosNum(JsonNode n)
@@ -302,6 +323,7 @@ namespace SetPressCam
                     Work = (int)work, Src = q["src"] == null ? "" : Str(q["src"]), Hits = hits,
                     Warn = Arr(q["warn"]).Select(Str).ToList(),
                     Org = org != null && Finite(ox) && Finite(oy) ? new Org { X = ox, Y = oy } : null,
+                    Nx = F23Count(q["nx"]), Ny = F23Count(q["ny"]), Px = F23Pitch(q["px"]), Py = F23Pitch(q["py"]),
                 });
             }
             double nextId = Num(d["nextId"]);

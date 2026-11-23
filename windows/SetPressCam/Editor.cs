@@ -33,6 +33,16 @@ namespace SetPressCam
     {
         public string Text, Key;
         public bool Comment;
+        /// <summary>F23 のピッチ・列数の行: 書き換えられる欄（無ければ null）。</summary>
+        public CodeEdit Edit;
+    }
+
+    /// <summary>コードの行の中の、書き換えられる 2 つの値（F23 のピッチ X Y、列数 X Y）。</summary>
+    public class CodeEdit
+    {
+        public int Work;
+        public string[] Fields, Vals, Prefix;
+        public string Note;
     }
 
     public partial class Editor

@@ -298,6 +298,8 @@ namespace SetPressCam
             var panel = new Panel { Dock = DockStyle.Right, Width = Ui.S(340), BackColor = Ui.PANEL, Padding = new Padding(1, 0, 0, 0) };
             panel.Paint += (s, e) => { using (var p = new Pen(Ui.LINE)) e.Graphics.DrawLine(p, 0, 0, 0, panel.Height); };
             code = new CodeView { Dock = DockStyle.Fill };
+            code.FieldEdited += (work, field, text) => ed.SetF23(work, field, text);  // F23 のピッチ・列数
+            code.EditDone += () => canvas.Focus();
             code.LineClicked += key =>
             {
                 if (key.StartsWith("hit:"))  // F3 のまとまり: 「割付」にして抜く範囲をハイライトする

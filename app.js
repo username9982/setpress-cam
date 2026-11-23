@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.17.10';
+const APP_VERSION = '0.17.11';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -36,7 +36,7 @@ function newDoc() {
     tools: Array.from({ length: TOOL_COUNT }, emptyTool),
     sheet: { w: 1000, h: 500, t: null },  // t: 板厚（mm、未設定は null）
     mj: lastMj(),  // ミクロジョイント（mm、0 はつなげない）
-    layouts: [],  // 割付 [{work: 外形の点, src: 割付したときの穴の形, hits: [{tool, x0, y0, x1, y1}], warn: []}]
+    layouts: [],  // 割付 [{work: 外形の点, src: 割付したときの穴の形, hits: [{tool, x0, y0, x1, y1}], warn: [], nx?, ny?: F23 の列数, px?, py?: F23 のピッチ（無ければ自動）}]
     points: [],
     lines: [],
     dims: [],
@@ -282,6 +282,7 @@ function draw() {
 
   // 閉じた図形の塗り → 寸法 → 線 → 点 → 原点 の順に重ねる
   drawFills();
+  drawCopies();
   if (mode === 'layout') drawLayout();
   dimHits = [];
   originHits = [];
@@ -304,6 +305,45 @@ function drawBox() {
   ctx.fillRect(Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay));
   ctx.strokeRect(Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay));
   ctx.restore();
+}
+
+// F23 の多数個取りのプレビュー: 2 個目からの位置に、ワークの線と抜く範囲を点線で描く（板からはみ出すものは赤）
+function drawCopies() {
+  for (const lay of doc.layouts) {
+    const k = info.owner.get(lay.work);
+    if (k == null || !lay.hits.length) continue;
+    const f = f23Of(lay);
+    if (f.nx * f.ny <= 1) continue;
+    const ls = doc.lines.filter((l) => info.owner.get(l.a) === k && info.owner.get(l.b) === k);
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    for (let j = 0; j < f.ny; j++) for (let i = 0; i < f.nx; i++) {
+      if (!i && !j) continue;
+      const dx = i * f.px, dy = -j * f.py;  // Y は下へ並べる
+      const [ax, ay] = toScreen(f.x0 + dx, f.y1 + dy), [bx, by] = toScreen(f.x1 + dx, f.y0 + dy);
+      const out = f.x0 + dx < -1e-6 || f.x1 + dx > doc.sheet.w + 1e-6 || f.y0 + dy < -1e-6 || f.y1 + dy > doc.sheet.h + 1e-6;
+      ctx.fillStyle = out ? 'rgba(200, 60, 40, 0.10)' : 'rgba(47, 128, 209, 0.07)';
+      ctx.fillRect(ax, ay, bx - ax, by - ay);
+      ctx.strokeStyle = out ? 'rgba(200, 60, 40, 0.7)' : 'rgba(47, 128, 209, 0.45)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(ax, ay, bx - ax, by - ay);
+      ctx.strokeStyle = out ? 'rgba(200, 60, 40, 0.85)' : 'rgba(47, 128, 209, 0.8)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (const l of ls) {
+        const a = P(l.a), b = P(l.b);
+        const [p1, q1] = toScreen(a.x + dx, a.y + dy), [p2, q2] = toScreen(b.x + dx, b.y + dy);
+        ctx.moveTo(p1, q1);
+        ctx.lineTo(p2, q2);
+      }
+      ctx.stroke();
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.font = '11px sans-serif';
+      ctx.textBaseline = 'top';
+      ctx.fillText(`S${k + 1}-${j * f.nx + i + 1}`, ax + 3, ay + 2);
+    }
+    ctx.restore();
+  }
 }
 
 // 閉じた図形の内側を半透明で塗る。外形を塗ってから、穴・切り欠きの形で抜く。
@@ -1484,9 +1524,12 @@ function autoLayout() {
   snapshot();
   const key = workKey(k);
   const before = workOrigin(k);  // 前の割付があれば、その原点
+  const prev = layoutOf(k);  // F23 のピッチ・列数は割り付け直しても保つ
   doc.layouts = doc.layouts.filter((q) => info.owner.get(q.work) !== k);
   const o = info.outers[k].origin;
-  doc.layouts.push({ work: key, src: holeSrc(k), hits, warn, org: { x: o.x, y: o.y } });
+  const keep = {};
+  for (const f of F23_FIELDS) if (prev && prev[f] != null) keep[f] = prev[f];
+  doc.layouts.push({ work: key, src: holeSrc(k), hits, warn, org: { x: o.x, y: o.y }, ...keep });
   keepSheetDims(k, before);
   layoutHit = null;
   changed();
@@ -1705,9 +1748,55 @@ function drawLayout() {
 function fmt(v) {
   return String(round(v));
 }
+// ---- F23（多数個取り）: ピッチと列数 ----
+// ピッチは、書き換えていなければ 金型が抜く形を囲む四角 + 10 mm。列数は 1〜99（X は右へ、Y は下へ並べる）
+const F23_FIELDS = ['nx', 'ny', 'px', 'py'];
+const F23_MAX = 99;
+function f23Count(v) { const n = Number(v); return Number.isInteger(n) && n > 1 && n <= F23_MAX ? n : null; }
+function f23Pitch(v) { const n = Number(v); return v != null && v !== '' && Number.isFinite(n) && n > 0 ? round(Math.min(n, 5000)) : null; }
+// 図面ファイルから読んだ値を直す（既定の値は書かない）
+function f23Fields(q) {
+  const r = {};
+  for (const f of ['nx', 'ny']) { const v = f23Count(q[f]); if (v != null) r[f] = v; }
+  for (const f of ['px', 'py']) { const v = f23Pitch(q[f]); if (v != null) r[f] = v; }
+  return r;
+}
+function f23Of(lay) {
+  const hs = hitsOf(lay);
+  const x0 = hs.length ? Math.min(...hs.map((h) => h.x0)) : 0, x1 = hs.length ? Math.max(...hs.map((h) => h.x1)) : 0;
+  const y0 = hs.length ? Math.min(...hs.map((h) => h.y0)) : 0, y1 = hs.length ? Math.max(...hs.map((h) => h.y1)) : 0;
+  return {
+    x0, y0, x1, y1,
+    px: lay.px ?? round(x1 - x0 + 10), py: lay.py ?? round(y1 - y0 + 10),
+    nx: lay.nx || 1, ny: lay.ny || 1,
+  };
+}
+// コードの区画で F23 の値を書き換えたとき。列数は空なら 1、ピッチは空なら自動に戻す
+function setF23(work, field, text) {
+  const lay = doc.layouts.find((q) => q.work === work);
+  if (!lay) return;
+  const t = String(text).trim();
+  let v;
+  if (field === 'nx' || field === 'ny') {
+    const n = t === '' ? 1 : Math.round(Number(t));
+    if (!Number.isFinite(n)) return;
+    v = Math.min(Math.max(n, 1), F23_MAX);
+    if (v === 1) v = null;
+  } else {
+    if (t !== '' && !Number.isFinite(Number(t))) return;
+    v = t === '' ? null : f23Pitch(Math.max(Number(t), 0.1));
+  }
+  if ((lay[field] ?? null) === v) return;
+  snapshot();
+  lay[field] = v;
+  // 図面ファイルでの並びを nx, ny, px, py にそろえる（Windows 版と同じ JSON にする）
+  for (const f of F23_FIELDS) { const x = lay[f]; delete lay[f]; if (x != null) lay[f] = x; }
+  changed();
+}
+
 function genCode() {
-  const lines = [];  // {text, key?, comment?}
-  const add = (text, key, comment = false) => lines.push({ text, key, comment });
+  const lines = [];  // {text, key?, comment?, edit?: F23 の書き換えられる行 {work, fields, vals, prefix, note}}
+  const add = (text, key, comment = false, edit = null) => lines.push({ text, key, comment, edit });
   add(`; セットプレス CAM v${APP_VERSION}`, null, true);
   add(`; 図面 ${doc.name || '名前なし'}  板 ${fmt(doc.sheet.w)} x ${fmt(doc.sheet.h)} mm`, null, true);
   add(`; 板厚 ${doc.sheet.t ? `${fmt(doc.sheet.t)} mm` : '未設定'}`, null, true);
@@ -1726,9 +1815,13 @@ function genCode() {
     add(`; S${k + 1} 割付  T → F100〜F110 でマクロに登録 → F23 で配置。F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法`, null, true);
     if (lay.src !== holeSrc(k)) add('; ※ 割付のあとで図形が変わりました。もう一度自動割付してください', null, true);
     if (!hs.length) { add('; 抜く所がありません', null, true); continue; }
-    // F23 のピッチ: 金型が抜く形を囲む四角 + 10 mm（多数個取りの間隔）
-    const bw = Math.max(...hs.map((h) => h.x1)) - Math.min(...hs.map((h) => h.x0));
-    const bh = Math.max(...hs.map((h) => h.y1)) - Math.min(...hs.map((h) => h.y0));
+    // F23 のピッチ（書き換えていなければ 金型が抜く形を囲む四角 + 10 mm）と列数
+    const f = f23Of(lay);
+    if (f.x0 < -1e-6 || f.y1 > doc.sheet.h + 1e-6 || f.x1 + (f.nx - 1) * f.px > doc.sheet.w + 1e-6 || f.y0 - (f.ny - 1) * f.py < -1e-6)
+      add('; ※ 多数個取りの並びが板からはみ出します', null, true);
+    if ((f.nx > 1 && f.px < f.x1 - f.x0 - 1e-6) || (f.ny > 1 && f.py < f.y1 - f.y0 - 1e-6))
+      add('; ※ ピッチが抜く形より小さく、となりと重なります', null, true);
+    const pitchAuto = lay.px == null && lay.py == null;
     const xy = (x, y, note, ind = '  ') => `${ind}${('X' + fmt(x)).padEnd(8)}${('Y' + fmt(y)).padEnd(8)}; ${note}`;
     // 同じ金型が続くまとまりごとに、T → マクロ → F23 を出す
     // （入る金型がない所は、金型を替えないのでいまのまとまりに入れる）
@@ -1767,12 +1860,15 @@ function genCode() {
       }
       add('F110', null);
       // F23: マクロ番号 → 板の原点（左上）からワーク原点までの XY → ピッチ XY → 列数 XY
-      add('; F23: マクロ番号 → 板の原点からワーク原点まで XY → ピッチ XY（抜く形 + 10）→ 列数 XY', null, true);
+      add('; F23: マクロ番号 → 板の原点からワーク原点まで XY → ピッチ XY（抜く形 + 10）→ 列数 XY（ピッチ・列数は書き換えられる）', null, true);
       add('F23', null);
       add(`  ${String(mno).padEnd(16)}; マクロ番号`, null);
       add(xy(sheetPos(k, 'x'), sheetPos(k, 'y'), 'ワーク原点'), null);
-      add(xy(bw + 10, bh + 10, 'ピッチ'), null);
-      add(`  ${'1'.padEnd(8)}${'1'.padEnd(8)}; 列数`, null);
+      const pnote = pitchAuto ? 'ピッチ' : 'ピッチ（書き換えた値。空にすると自動）';
+      add(xy(f.px, f.py, pnote), null, false,
+        { work: lay.work, fields: ['px', 'py'], vals: [fmt(f.px), fmt(f.py)], prefix: ['X', 'Y'], note: pnote });
+      add(`  ${String(f.nx).padEnd(8)}${String(f.ny).padEnd(8)}; 列数`, null, false,
+        { work: lay.work, fields: ['nx', 'ny'], vals: [String(f.nx), String(f.ny)], prefix: ['', ''], note: '列数' });
       s0 = s1;
     }
   }
@@ -1785,9 +1881,15 @@ function genCode() {
 }
 
 let lastCodeSel = '';
-function renderCode() {
+let holdCode = false;
+function renderCode(force = false) {
   const box = $('code');
-  if (!box) return;  // 更新の途中で古い index.html と組み合わさったとき
+  if (!box || holdCode) return;  // 更新の途中で古い index.html と組み合わさったとき
+  // F23 の欄を書き換えている途中は作り直さない（書いている文字が消えるので）。確定したら作り直し、同じ欄に戻す
+  const act = document.activeElement;
+  const editing = act && act.classList && act.classList.contains('code-in') && box.contains(act) ? act.dataset.field : null;
+  if (editing && !force) return;
+  const keep = editing ? { value: act.value, s: act.selectionStart, e: act.selectionEnd } : null;
   const lines = genCode();
   const selKeys = new Set(sel.map((s) => `${s.t}:${s.id}`));
   if (layoutHit) selKeys.add(hitKey(layoutHit.work, layoutHit.i));
@@ -1803,11 +1905,37 @@ function renderCode() {
     no.textContent = i + 1;
     const tx = document.createElement('span');
     tx.className = 'tx';
-    tx.textContent = l.text;
+    if (l.edit) {
+      // F23 のピッチ・列数: 書き換えられる欄にする（コピーするときは l.text の同じ値を使う）
+      tx.append('  ');
+      l.edit.fields.forEach((f, j) => {
+        if (l.edit.prefix[j]) tx.append(l.edit.prefix[j]);
+        const inp = document.createElement('input');
+        inp.className = 'code-in';
+        inp.inputMode = 'decimal';
+        inp.value = l.edit.vals[j];
+        inp.dataset.field = `${l.edit.work}:${f}`;
+        inp.addEventListener('change', () => {
+          // Tab で次の欄へ移るときは、移り終わってから作り直す（先に作り直すと移る先の欄が消える）
+          holdCode = true;
+          try { setF23(l.edit.work, f, inp.value); } finally { holdCode = false; }
+          setTimeout(() => renderCode(true), 0);
+        });
+        inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
+        inp.addEventListener('focus', () => inp.select());  // タップしたら全部を選び、そのまま打ち直せるようにする
+        tx.append(inp, ' ');
+      });
+      tx.append(`; ${l.edit.note}`);
+    } else {
+      tx.textContent = l.text;
+    }
     row.append(no, tx);
     box.append(row);
     if (!firstSel && on) firstSel = row;
   });
+  // 書き換えている途中の欄は、書いた文字と選んだ範囲もそのまま戻す
+  const back = editing && box.querySelector(`.code-in[data-field="${editing}"]`);
+  if (back) { back.value = keep.value; back.focus(); back.setSelectionRange(keep.s, keep.e); }
   // 選んだものが変わったときだけ、その行まで送る
   const sig = [...selKeys].join();
   if (sig !== lastCodeSel && firstSel) firstSel.scrollIntoView({ block: 'nearest' });
@@ -1955,6 +2083,7 @@ function loadDoc(d) {
       })).filter((h) => [h.x0, h.y0, h.x1, h.y1].every(Number.isFinite)),
       warn: (Array.isArray(q.warn) ? q.warn : []).map(String),
       org: q.org && Number.isFinite(Number(q.org.x)) && Number.isFinite(Number(q.org.y)) ? { x: Number(q.org.x), y: Number(q.org.y) } : null,
+      ...f23Fields(q),
     })),
     nextId: Math.max(Number(d.nextId) || 1, maxId + 1),
   };
