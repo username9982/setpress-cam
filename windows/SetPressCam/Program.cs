@@ -24,15 +24,13 @@ namespace SetPressCam
         static int Main(string[] args)
         {
             if (args.Length == 3 && args[0] == "--gencode") return GenCode(args[1], args[2]);
-            // Domino と同じく、わざと高 DPI に対応しない（Windows が 100 % で描いて引き伸ばすので、枠が Domino と同じになる）
-            Application.SetHighDpiMode(HighDpiMode.DpiUnaware);
-            // 配った exe は Windows 7 互換モードで動かす（Domino の XP 互換モードと同じく、枠の余白をなくす）
-            if (Packaged && WinFrame.EnsureCompatMode(Environment.ProcessPath ?? Application.ExecutablePath, args)) return 0;
+            // 画面は Web 版と同じ見た目（Ui.cs）。表示スケールに合わせてくっきり描く（大きさは Ui.K を掛ける）
+            Application.SetHighDpiMode(HighDpiMode.SystemAware);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.SetDefaultFont(Ui.Font);
             var form = new MainForm();
-            if (args.Length > 0 && File.Exists(args[0])) form.Shown += (s, e) => form.OpenPath(args[0]);
+            if (args.Length > 0 && File.Exists(args[0])) form.StartFile = Path.GetFullPath(args[0]);
             Application.Run(form);
             return 0;
         }

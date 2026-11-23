@@ -15,9 +15,8 @@
     <AssemblyTitle>セットプレス CAM</AssemblyTitle>
     <Copyright></Copyright>
     <ApplicationIcon>setpresscam.ico</ApplicationIcon>
-    <!-- Domino と同じく高 DPI 非対応（manifest に DPI の項目を書かない。Program.cs でも DpiUnaware にする） -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationHighDpiMode>DpiUnaware</ApplicationHighDpiMode>
+    <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
     <ApplicationUseCompatibleTextRendering>false</ApplicationUseCompatibleTextRendering>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>

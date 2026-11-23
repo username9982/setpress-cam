@@ -1,5 +1,6 @@
-// 設定と作業中の図面の保存（%APPDATA%\SetPressCam）、図面ファイルの読み書き。
-// 図面ファイルは Web 版の「ファイルに書き出す」と同じ形 {app:'setpress-cam', version:1, exportedAt, drawings:{名前:{savedAt, doc}}}。
+// 設定・作業中の図面・保存した図面（%APPDATA%\SetPressCam）、ファイルへの書き出し・読み込み。
+// 保存した図面は drawings.json（Web 版の localStorage の保存と同じ {名前:{savedAt, doc}}）。
+// 書き出すファイルは Web 版の「ファイルに書き出す」と同じ形 {app:'setpress-cam', version:1, exportedAt, drawings:{名前:{savedAt, doc}}}。
 // Web 版の「ファイルから読み込む」でそのまま読め、Web 版で書き出したファイルもこのアプリで開ける。
 using System;
 using System.Collections.Generic;
@@ -34,6 +35,7 @@ namespace SetPressCam
         static string SETTINGS => Path.Combine(DIR, "settings.json");
         static string CURRENT => Path.Combine(DIR, "current.json");
         static string UNDO => Path.Combine(DIR, "undo.json");
+        static string DRAWINGS => Path.Combine(DIR, "drawings.json");
         static readonly UTF8Encoding UTF8 = new UTF8Encoding(false);
 
         public static Settings LoadSettings()
@@ -107,19 +109,29 @@ namespace SetPressCam
 
         public static string Now() { return DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'"); }
 
-        /// <summary>図面を 1 つ入れたファイルを書く（Web 版の書き出しと同じ形）。</summary>
-        public static void WriteDrawing(string path, string name, Doc doc)
+        static JsonObject ToObject(List<Entry> entries)
         {
-            var bundle = new JsonObject
-            {
-                ["app"] = "setpress-cam",
-                ["version"] = 1,
-                ["exportedAt"] = Now(),
-                ["drawings"] = new JsonObject
-                {
-                    [name] = new JsonObject { ["savedAt"] = Now(), ["doc"] = JsonNode.Parse(Model.Serialize(doc)) },
-                },
-            };
+            var o = new JsonObject();
+            foreach (var e in entries) o[e.Name] = new JsonObject { ["savedAt"] = e.SavedAt, ["doc"] = e.Doc.DeepClone() };
+            return o;
+        }
+
+        /// <summary>保存した図面（「保存」で入れたもの）。読めなければ空。</summary>
+        public static List<Entry> LoadStore()
+        {
+            try { if (File.Exists(DRAWINGS)) return ReadDrawings(DRAWINGS); } catch (Exception) { }
+            return new List<Entry>();
+        }
+
+        public static void WriteStore(List<Entry> entries)
+        {
+            WriteAtomic(DRAWINGS, new JsonObject { ["app"] = "setpress-cam", ["version"] = 1, ["drawings"] = ToObject(entries) }.ToJsonString(Model.JSON));
+        }
+
+        /// <summary>保存した図面をすべてファイルに書き出す（Web 版の「ファイルに書き出す」と同じ形）。</summary>
+        public static void Export(string path, List<Entry> entries)
+        {
+            var bundle = new JsonObject { ["app"] = "setpress-cam", ["version"] = 1, ["exportedAt"] = Now(), ["drawings"] = ToObject(entries) };
             WriteAtomic(path, bundle.ToJsonString(Model.JSON_INDENT));
         }
 

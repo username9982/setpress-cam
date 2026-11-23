@@ -1,4 +1,4 @@
-; セットプレス CAM（Windows 版）のインストーラー（Inno Setup 6）。windows/build_win.py が
+﻿; セットプレス CAM（Windows 版）のインストーラー（Inno Setup 6）。windows/build_win.py が
 ; AppVersion、SourceDir（ポータブル版のフォルダ）、OutputDir、IconFile、DotnetRuntime を渡して作る。
 ; 管理者権限なしで、ユーザーごとに入れる（.NET 10 が無い PC でだけ、ランタイムのインストーラーが管理者の確認を出す）。
 ;
@@ -71,9 +71,6 @@ Root: HKA; Subkey: "Software\Classes\Applications\SetPressCam.exe"; ValueType: s
 Root: HKA; Subkey: "Software\Classes\Applications\SetPressCam.exe\shell\open\command"; ValueType: string; ValueData: """{app}\SetPressCam.exe"" ""%1"""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\SetPressCam.exe\SupportedTypes"; ValueType: string; ValueName: ".json"; ValueData: ""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\.json\OpenWithList\SetPressCam.exe"; ValueType: none; Flags: uninsdeletekey; Tasks: openwith
-; Windows 7 互換モード（Domino の XP 互換モードと同じく、枠の余白をなくす）。ユーザーが選んだモードがあれば残す。
-; アプリも起動のとき、無ければ自分で書く。
-Root: HKCU; Subkey: "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"; ValueType: string; ValueName: "{app}\SetPressCam.exe"; ValueData: "~ WIN7RTM"; Flags: createvalueifdoesntexist uninsdeletevalue
 
 [Run]
 Filename: "{app}\SetPressCam.exe"; Description: "{cm:LaunchProgram,セットプレス CAM}"; Flags: nowait postinstall skipifsilent
@@ -172,11 +169,30 @@ begin
   Result := WizardSilent and (ExpandConstant('{param:RESTARTAPP|0}') = '1');
 end;
 
+{ 0.17.6 は互換モード（~ WIN7RTM）を付けていた。いまは使わないので、その値のときだけ消す（ユーザーが選んだモードは残す）。 }
+procedure RemoveOldCompatFlag();
+var
+  Key, Name, Value: String;
+begin
+  Key := 'Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers';
+  Name := ExpandConstant('{app}\SetPressCam.exe');
+  if RegQueryStringValue(HKCU, Key, Name, Value) and (Value = '~ WIN7RTM') then
+    RegDeleteValue(HKCU, Key, Name);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    RemoveOldCompatFlag();
+end;
+
 { 設定と作業中の図面（%APPDATA%\SetPressCam）も消すか尋ねる }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Dir: String;
 begin
+  if CurUninstallStep = usUninstall then
+    RemoveOldCompatFlag();
   Dir := ExpandConstant('{userappdata}\SetPressCam');
   if (CurUninstallStep = usPostUninstall) and not UninstallSilent and DirExists(Dir) then
     if MsgBox(CustomMessage('RemoveSettings'), mbConfirmation, MB_YESNO) = IDYES then

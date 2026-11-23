@@ -1,6 +1,6 @@
 // 新しい版の確認と更新。GitHub Releases のいちばん新しいリリースを見て、いまの版より新しければ
 // インストーラー（SetPressCam-<版>-setup.exe）をダウンロードし、確かめてから実行する。
-// 起動時（設定で止められる）とメニューの「更新の確認」から使う。
+// 起動時（設定で止められる）と「開く」の「更新の確認」から使う。
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -115,59 +115,6 @@ namespace SetPressCam
         public static void RunInstaller(string path)
         {
             Process.Start(new ProcessStartInfo(path, "/SILENT /SUPPRESSMSGBOXES /NORESTART /RESTARTAPP=1") { UseShellExecute = true });
-        }
-    }
-
-    /// <summary>ダウンロードの進み具合を出す小さなダイアログ。</summary>
-    public class DownloadDialog : ClassicDialog
-    {
-        readonly Label label;
-        readonly ProgressBar bar;
-        readonly CancellationTokenSource cts = new CancellationTokenSource();
-        public string Path;
-        public Exception Error;
-        readonly Release release;
-
-        public DownloadDialog(Release r) : base("更新のダウンロード")
-        {
-            release = r;
-            var t = new TableLayoutPanel { AutoSize = true, ColumnCount = 1, Padding = new Padding(12) };
-            label = new Label { Text = r.Name + " をダウンロードしています…", AutoSize = true, Margin = new Padding(0, 0, 0, 8) };
-            bar = new ProgressBar { Width = 320, Height = 16, Maximum = 1000, Margin = new Padding(0, 0, 0, 10) };
-            var cancel = new Button { Text = "キャンセル", AutoSize = true, MinimumSize = new System.Drawing.Size(75, 23), Anchor = AnchorStyles.Right };
-            cancel.Click += (s, e) => cts.Cancel();
-            t.Controls.Add(label);
-            t.Controls.Add(bar);
-            t.Controls.Add(cancel);
-            Controls.Add(t);
-            CancelButton = cancel;
-        }
-
-        protected override async void OnShown(EventArgs e)
-        {
-            base.OnShown(e);
-            try
-            {
-                var p = new Progress<double>(v => bar.Value = Math.Max(0, Math.Min(1000, (int)(v * 1000))));
-                Path = await Updater.Download(release, p, cts.Token);
-                DialogResult = DialogResult.OK;
-            }
-            catch (OperationCanceledException)
-            {
-                DialogResult = DialogResult.Cancel;
-            }
-            catch (Exception ex)
-            {
-                Error = ex;
-                DialogResult = DialogResult.Abort;
-            }
-            Close();
-        }
-
-        protected override void OnFormClosing(FormClosingEventArgs e)
-        {
-            cts.Cancel();
-            base.OnFormClosing(e);
         }
     }
 }

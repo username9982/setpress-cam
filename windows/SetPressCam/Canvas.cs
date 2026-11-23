@@ -48,10 +48,10 @@ namespace SetPressCam
         readonly List<(int id, RectangleF box)> dimHits = new List<(int, RectangleF)>();
         readonly List<(int id, RectangleF box)> originHits = new List<(int, RectangleF)>();
 
-        static readonly Font F13 = new Font("MS UI Gothic", 13f, GraphicsUnit.Pixel);
-        static readonly Font F12 = new Font("MS UI Gothic", 12f, GraphicsUnit.Pixel);
-        static readonly Font F13B = new Font("MS UI Gothic", 13f, FontStyle.Bold, GraphicsUnit.Pixel);
-        static readonly Font F12B = new Font("MS UI Gothic", 12f, FontStyle.Bold, GraphicsUnit.Pixel);
+        static readonly Font F13 = new Font("Yu Gothic UI", 13f, GraphicsUnit.Pixel);
+        static readonly Font F12 = new Font("Yu Gothic UI", 12f, GraphicsUnit.Pixel);
+        static readonly Font F13B = new Font("Yu Gothic UI", 13f, FontStyle.Bold, GraphicsUnit.Pixel);
+        static readonly Font F12B = new Font("Yu Gothic UI", 12f, FontStyle.Bold, GraphicsUnit.Pixel);
         static readonly StringFormat TYPO = MakeTypo();
 
         static StringFormat MakeTypo()
@@ -77,6 +77,14 @@ namespace SetPressCam
             TabStop = true;
         }
 
+        // 画面の拡大率（Windows の表示スケール）。中では Web 版と同じ CSS px で描き・測る
+        static readonly float K = Ui.K;
+        double CW { get { return Width / K; } }
+        double CH { get { return Height / K; } }
+        static int Mx(MouseEventArgs e) { return (int)Math.Round(e.X / K); }
+        static int My(MouseEventArgs e) { return (int)Math.Round(e.Y / K); }
+        static System.Drawing.Point Mp(MouseEventArgs e) { return new System.Drawing.Point(Mx(e), My(e)); }
+
         public PointF ToScreen(double x, double y) { return new PointF((float)(Ox + x * Scale), (float)(Oy - y * Scale)); }
         public V ToWorld(double sx, double sy) { return new V((sx - Ox) / Scale, (Oy - sy) / Scale); }
 
@@ -84,22 +92,22 @@ namespace SetPressCam
         {
             const double m = 40;
             var sh = ed.Doc.Sheet;
-            double s = Math.Min((Width - 2 * m) / sh.W, (Height - 2 * m) / sh.H);
+            double s = Math.Min((CW - 2 * m) / sh.W, (CH - 2 * m) / sh.H);
             Scale = Math.Max(s, 0.01);
-            Ox = (Width - sh.W * Scale) / 2;
-            Oy = (Height + sh.H * Scale) / 2;
+            Ox = (CW - sh.W * Scale) / 2;
+            Oy = (CH + sh.H * Scale) / 2;
             Fitted = true;
             Invalidate();
         }
 
-        Size lastSize;
+        SizeF lastSize;
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (Width == 0 || Height == 0) return;
+            if (CW == 0 || CH == 0) return;
             if (lastSize.Width == 0 || Fitted) FitView();
-            else { Ox += (Width - lastSize.Width) / 2.0; Oy += (Height - lastSize.Height) / 2.0; }
-            lastSize = Size;
+            else { Ox += (CW - lastSize.Width) / 2.0; Oy += (CH - lastSize.Height) / 2.0; }
+            lastSize = new SizeF((float)CW, (float)CH);
         }
 
         // ---- 描画 ----
@@ -114,6 +122,7 @@ namespace SetPressCam
         {
             var g = e.Graphics;
             g.Clear(BackColor);
+            g.ScaleTransform(K, K);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             var doc = ed.Doc;
@@ -129,13 +138,13 @@ namespace SetPressCam
             using (var pMinor = new Pen(Ui.Hex("#eef1f4")))
             {
                 // 見えている範囲だけ引く
-                int kx0 = Math.Max(0, (int)Math.Floor((-Ox) / Scale / step)), kx1 = (int)Math.Ceiling((Width - Ox) / Scale / step);
+                int kx0 = Math.Max(0, (int)Math.Floor((-Ox) / Scale / step)), kx1 = (int)Math.Ceiling((CW - Ox) / Scale / step);
                 for (int k = kx0; k * step <= w + 1e-9 && k <= kx1; k++)
                 {
                     float sx = (float)Math.Round(ToScreen(k * step, 0).X);
                     g.DrawLine(isMajor(k * step) ? pMajor : pMinor, sx, tl.Y, sx, tl.Y + sh);
                 }
-                int ky0 = Math.Max(0, (int)Math.Floor((Oy - Height) / Scale / step) - 1), ky1 = (int)Math.Ceiling(Oy / Scale / step) + 1;
+                int ky0 = Math.Max(0, (int)Math.Floor((Oy - CH) / Scale / step) - 1), ky1 = (int)Math.Ceiling(Oy / Scale / step) + 1;
                 for (int k = 0; k * step <= h + 1e-9; k++)
                 {
                     double y = h - k * step;  // 板の左上から下へ
@@ -539,15 +548,15 @@ namespace SetPressCam
             if (e.Button == MouseButtons.Right || e.Button == MouseButtons.Middle)
             {
                 if (drag != null && drag.Kind == "move") CancelMove();
-                drag = new Drag { Kind = "pan", Start = e.Location, Ox = Ox, Oy = Oy };
+                drag = new Drag { Kind = "pan", Start = Mp(e), Ox = Ox, Oy = Oy };
                 Capture = true;
                 return;
             }
             if (e.Button != MouseButtons.Left || drag != null) return;
-            var w = ToWorld(e.X, e.Y);
+            var w = ToWorld(Mx(e), My(e));
             Capture = true;
             if (ed.Mode == "draw") drag = new Drag { Kind = "stroke", Raw = new List<V> { w } };
-            else drag = new Drag { Kind = "press", Hit = HitTest(e.X, e.Y), Start = e.Location, World = w };
+            else drag = new Drag { Kind = "press", Hit = HitTest(Mx(e), My(e)), Start = Mp(e), World = w };
         }
 
         void CancelMove()
@@ -559,7 +568,7 @@ namespace SetPressCam
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
-            var w = ToWorld(e.X, e.Y);
+            var w = ToWorld(Mx(e), My(e));
             {
                 double step = SnapStep();
                 double sx = ed.SnapAxis(w.X, "x", step), sy = ed.SnapAxis(w.Y, "y", step);
@@ -570,8 +579,8 @@ namespace SetPressCam
             if (drag == null) return;
             if (drag.Kind == "pan")
             {
-                Ox = drag.Ox + (e.X - drag.Start.X);
-                Oy = drag.Oy + (e.Y - drag.Start.Y);
+                Ox = drag.Ox + (Mx(e) - drag.Start.X);
+                Oy = drag.Oy + (My(e) - drag.Start.Y);
                 Fitted = false;
                 Invalidate();
                 return;
@@ -585,7 +594,7 @@ namespace SetPressCam
             if (drag.Kind == "press")
             {
                 var h = drag.Hit;
-                if (ed.Mode == "move" && h != null && Geo.Hypot(e.X - drag.Start.X, e.Y - drag.Start.Y) > 8) StartMove(h);
+                if (ed.Mode == "move" && h != null && Geo.Hypot(Mx(e) - drag.Start.X, My(e) - drag.Start.Y) > 8) StartMove(h);
             }
             if (drag != null && drag.Kind == "move") DoMove(w);
         }
@@ -708,8 +717,8 @@ namespace SetPressCam
         {
             base.OnMouseWheel(e);
             double k = Math.Exp(e.Delta * 0.0015);
-            Ox = e.X - (e.X - Ox) * k;
-            Oy = e.Y - (e.Y - Oy) * k;
+            Ox = Mx(e) - (Mx(e) - Ox) * k;
+            Oy = My(e) - (My(e) - Oy) * k;
             Scale *= k;
             Fitted = false;
             Invalidate();
