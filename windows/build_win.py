@@ -31,7 +31,7 @@ BUILD = os.path.join(HERE, "build")
 DIST = os.path.join(BUILD, "dist", "SetPressCam")
 OUTPUT = os.path.join(BUILD, "output")
 
-VERSION = "0.17.6"  # Program.VERSION、SetPressCam.csproj の <Version>、app.js の APP_VERSION と同じにする
+VERSION = "0.17.7"  # Program.VERSION、SetPressCam.csproj の <Version>、app.js の APP_VERSION と同じにする
 
 # .NET 10 デスクトップ ランタイム（csproj の net10.0-windows に合わせる）。ハッシュは Microsoft の
 # https://builds.dotnet.microsoft.com/dotnet/release-metadata/10.0/releases.json に載っている値

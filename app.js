@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.17.6';
+const APP_VERSION = '0.17.7';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -2091,6 +2091,25 @@ $('btn-export').addEventListener('click', () => {
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
 });
 $('btn-import').addEventListener('click', () => $('import-file').click());
+
+// Windows 版のインストーラー: いちばん新しいリリースのファイルへ直接つなぐ。
+// 取れないとき（オフラインなど）は、リリースのページを開くリンクのまま。
+const RELEASES_API = 'https://api.github.com/repos/username9982/setpress-cam/releases/latest';
+const DOWNLOAD_PREFIX = 'https://github.com/username9982/setpress-cam/releases/download/';
+async function findWindowsInstaller() {
+  try {
+    const res = await fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } });
+    if (!res.ok) return;
+    const rel = await res.json();
+    const asset = (rel.assets || []).find((a) => /^SetPressCam-.+-setup\.exe$/i.test(a.name || ''));
+    const url = asset && asset.browser_download_url;
+    if (typeof url !== 'string' || !url.startsWith(DOWNLOAD_PREFIX)) return;
+    const link = $('dl-windows');
+    link.href = url;
+    link.removeAttribute('target');
+    link.textContent = `Windows 版をダウンロード（${rel.tag_name}）`;
+  } catch (e) { /* オフライン */ }
+}
 $('import-file').addEventListener('change', async () => {
   const file = $('import-file').files[0];
   $('import-file').value = '';
@@ -2119,6 +2138,7 @@ window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault()
 
 (function start() {
   $('st-ver').textContent = `v${APP_VERSION}`;
+  if (navigator.onLine !== false) findWindowsInstaller();
   try {
     const cur = JSON.parse(localStorage.getItem(CURRENT_KEY));
     if (cur && cur.doc) {

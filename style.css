@@ -223,6 +223,12 @@ dialog input[type=text] { flex: 1; }
 .dlg-buttons { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
 .dlg-buttons button { background: #6b7c8c; }
 .dlg-buttons button.primary { background: var(--primary); }
+/* Windows 版のダウンロード（リンクをボタンと同じ見た目にして、左に寄せる） */
+.link-button {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; margin-right: auto;
+  border-radius: 8px; background: #3d6e9e; color: #fff; font-weight: 600; text-decoration: none;
+}
+.link-button:active { filter: brightness(1.2); }
 
 /* プログラム番号と金型 */
 #dlg-project { width: 640px; }

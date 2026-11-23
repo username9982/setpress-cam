@@ -23,7 +23,7 @@
   [hidden] { display: none !important; }
   #stage { position: relative; flex: 1; min-width: 0; min-height: 0; }
 </style>
-<link rel="stylesheet" href="style.css?v=0.17.6">
+<link rel="stylesheet" href="style.css?v=0.17.7">
 <!-- ?v= は tools/bump_version.py で書き換える。古い style.css・app.js と組み合わさらないようにするため -->
 </head>
 <body>
@@ -136,6 +136,8 @@
     <h2>開く</h2>
     <ul id="open-list"></ul>
     <div class="dlg-buttons">
+      <a id="dl-windows" class="link-button" href="https://github.com/username9982/setpress-cam/releases/latest"
+         target="_blank" rel="noopener" title="Windows の PC で使うアプリのインストーラー（書き出したファイルを開ける）">Windows 版をダウンロード</a>
       <button type="button" id="btn-import">ファイルから読み込む</button>
       <button type="button" id="btn-export">ファイルに書き出す</button>
       <button value="cancel">閉じる</button>
@@ -154,7 +156,7 @@
   </form>
 </dialog>
 
-<script src="geom.js?v=0.17.6"></script>
-<script src="app.js?v=0.17.6"></script>
+<script src="geom.js?v=0.17.7"></script>
+<script src="app.js?v=0.17.7"></script>
 </body>
 </html>
