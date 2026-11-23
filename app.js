@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.17.8';
+const APP_VERSION = '0.17.9';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1668,51 +1668,67 @@ function genCode() {
   add(programText(doc.program), null);
   doc.tools.forEach((t, i) => add(`; T${i + 1} ${toolText(t)}`, null, true));
   // 割付（いちばん上に出す）: 機械に手で打ち込む順に並べる。F3 のあとに 左上の開始点 → XY 寸法 → 金型の XY 寸法
-  // ワークごとに F100〜（マクロ番号）と F110 で囲んでマクロに登録し、F23 で板の上の位置へ呼び出す
+  // ワークごとに F100〜（マクロ番号）と F110 で囲んでマクロに登録し、F23 で板の上の位置へ呼び出す。
+  // マクロの中には T 番号を書けないので、T はマクロの前に出し、金型が変わる所でマクロを分ける
   let macroNo = 100;
   for (const lay of doc.layouts) {
     const k = info.owner.get(lay.work);
     if (k == null) continue;
     const o = workOrigin(k);  // 抜く範囲の左上
-    const mno = macroNo++;
-    add('', null);
-    add(`; S${k + 1} 割付  F${mno}〜F110 でマクロ ${mno} に登録。F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法`, null, true);
-    add(`F${mno}`, null);
-    if (lay.src !== holeSrc(k)) add('; ※ 割付のあとで図形が変わりました。もう一度自動割付してください', null, true);
-    const xy = (x, y, note) => `  ${('X' + fmt(x)).padEnd(8)}${('Y' + fmt(y)).padEnd(8)}; ${note}`;
-    let curTool = null;
-    hitsOf(lay).forEach((h, i) => {
-      const t = h.tool == null ? null : doc.tools[h.tool];
-      const hk = hitKey(lay.work, i);  // この F3 のまとまりの行をタップすると、抜く範囲をハイライトする
-      const f13 = macroOf(h) === 'F13';
-      const single = macroOf(h) === '単発';
-      add(f13 ? `; ${i + 1} 外形  F13: 開始点（左上）→ 外形 XY → 金型 XY → 角 R（金型寸法のぶん外側）`
-        : `; ${i + 1}${h.kind === 'notch' ? ' 切り欠き' : ''}${single ? '  単発: 金型の中心' : ''}`, hk, true);
-      if (h.tool != null && h.tool !== curTool) { add(`T${h.tool + 1}`, hk); curTool = h.tool; }
-      if (f13) {
-        const singles = f13Singles(h);
-        if (singles.length) add('; 単発（短いほうの辺のつながりを、ミクロジョイントの長さまで先に抜く。F13 の帯と約 1/3 重ねる）  金型の中心', hk, true);
-        for (const q of singles) add(xy((q.x0 + q.x1) / 2 - o.x, o.y - (q.y0 + q.y1) / 2, '単発 中心'), hk);
-      }
-      if (single) { add(xy((h.x0 + h.x1) / 2 - o.x, o.y - (h.y0 + h.y1) / 2, '単発 中心'), hk); return; }
-      add(macroOf(h), hk);
-      add(xy(h.x0 - o.x, o.y - h.y1, '開始点'), hk);
-      add(xy(h.x1 - h.x0, h.y1 - h.y0, f13 ? '外形' : '寸法'), hk);
-      add(t ? xy(t.w, t.h, '金型') : '  ?       ?       ; 金型（入る長方形の金型がない）', hk);
-      if (f13) add(`  ${('R' + fmt(f13R(h))).padEnd(16)}; 角 R${h.mj ? `（金型 + ミクロジョイント ${fmt(h.mj)}）` : ''}`, hk);
-    });
-    if (!lay.hits.length) add('; 抜く所がありません', null, true);
-    add('F110', null);
-    // F23: マクロ番号 → 板の原点（左上）からワーク原点までの XY → ピッチ（抜く形を囲む四角 + 10 mm）→ 列数 XY
     const hs = hitsOf(lay);
-    const bw = hs.length ? Math.max(...hs.map((h) => h.x1)) - Math.min(...hs.map((h) => h.x0)) : 0;
-    const bh = hs.length ? Math.max(...hs.map((h) => h.y1)) - Math.min(...hs.map((h) => h.y0)) : 0;
-    add(`; S${k + 1} 配置  F23: マクロ番号 → 板の原点からワーク原点まで XY → ピッチ XY（抜く形 + 10）→ 列数 XY`, null, true);
-    add('F23', null);
-    add(`  ${String(mno).padEnd(16)}; マクロ番号`, null);
-    add(xy(sheetPos(k, 'x'), sheetPos(k, 'y'), 'ワーク原点'), null);
-    add(xy(bw + 10, bh + 10, 'ピッチ'), null);
-    add(`  ${'1'.padEnd(8)}${'1'.padEnd(8)}; 列数`, null);
+    add('', null);
+    add(`; S${k + 1} 割付  T → F100〜F110 でマクロに登録 → F23 で配置。F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法`, null, true);
+    if (lay.src !== holeSrc(k)) add('; ※ 割付のあとで図形が変わりました。もう一度自動割付してください', null, true);
+    if (!hs.length) { add('; 抜く所がありません', null, true); continue; }
+    // F23 のピッチ: 金型が抜く形を囲む四角 + 10 mm（多数個取りの間隔）
+    const bw = Math.max(...hs.map((h) => h.x1)) - Math.min(...hs.map((h) => h.x0));
+    const bh = Math.max(...hs.map((h) => h.y1)) - Math.min(...hs.map((h) => h.y0));
+    const xy = (x, y, note, ind = '  ') => `${ind}${('X' + fmt(x)).padEnd(8)}${('Y' + fmt(y)).padEnd(8)}; ${note}`;
+    // 同じ金型が続くまとまりごとに、T → マクロ → F23 を出す
+    // （入る金型がない所は、金型を替えないのでいまのまとまりに入れる）
+    let curTool = null;
+    for (let s0 = 0; s0 < hs.length;) {
+      let s1 = s0, tool = null;
+      for (; s1 < hs.length; s1++) {
+        const tt = hs[s1].tool;
+        if (tt == null) continue;
+        if (tool == null) tool = tt; else if (tt !== tool) break;
+      }
+      const mno = macroNo++;
+      if (tool != null && tool !== curTool) { add(`T${tool + 1}`, null); curTool = tool; }
+      add(`F${mno}`, null);
+      const madd = (text, key, comment = false) => add('  ' + text, key, comment);  // マクロの中は 1 段下げる
+      const mxy = (x, y, note) => xy(x, y, note, '    ');
+      for (let i = s0; i < s1; i++) {
+        const h = hs[i];
+        const t = h.tool == null ? null : doc.tools[h.tool];
+        const hk = hitKey(lay.work, i);  // この F3 のまとまりの行をタップすると、抜く範囲をハイライトする
+        const f13 = macroOf(h) === 'F13';
+        const single = macroOf(h) === '単発';
+        madd(f13 ? `; ${i + 1} 外形  F13: 開始点（左上）→ 外形 XY → 金型 XY → 角 R（金型寸法のぶん外側）`
+          : `; ${i + 1}${h.kind === 'notch' ? ' 切り欠き' : ''}${single ? '  単発: 金型の中心' : ''}`, hk, true);
+        if (f13) {
+          const singles = f13Singles(h);
+          if (singles.length) madd('; 単発（短いほうの辺のつながりを、ミクロジョイントの長さまで先に抜く。F13 の帯と約 1/3 重ねる）  金型の中心', hk, true);
+          for (const q of singles) add(mxy((q.x0 + q.x1) / 2 - o.x, o.y - (q.y0 + q.y1) / 2, '単発 中心'), hk);
+        }
+        if (single) { add(mxy((h.x0 + h.x1) / 2 - o.x, o.y - (h.y0 + h.y1) / 2, '単発 中心'), hk); continue; }
+        madd(macroOf(h), hk);
+        add(mxy(h.x0 - o.x, o.y - h.y1, '開始点'), hk);
+        add(mxy(h.x1 - h.x0, h.y1 - h.y0, f13 ? '外形' : '寸法'), hk);
+        add(t ? mxy(t.w, t.h, '金型') : '    ?       ?       ; 金型（入る長方形の金型がない）', hk);
+        if (f13) add(`    ${('R' + fmt(f13R(h))).padEnd(16)}; 角 R${h.mj ? `（金型 + ミクロジョイント ${fmt(h.mj)}）` : ''}`, hk);
+      }
+      add('F110', null);
+      // F23: マクロ番号 → 板の原点（左上）からワーク原点までの XY → ピッチ XY → 列数 XY
+      add('; F23: マクロ番号 → 板の原点からワーク原点まで XY → ピッチ XY（抜く形 + 10）→ 列数 XY', null, true);
+      add('F23', null);
+      add(`  ${String(mno).padEnd(16)}; マクロ番号`, null);
+      add(xy(sheetPos(k, 'x'), sheetPos(k, 'y'), 'ワーク原点'), null);
+      add(xy(bw + 10, bh + 10, 'ピッチ'), null);
+      add(`  ${'1'.padEnd(8)}${'1'.padEnd(8)}; 列数`, null);
+      s0 = s1;
+    }
   }
   // 機械に入力するデータとコメントだけを出す（図形の点・線・寸法の一覧は出さない）
   if (!doc.layouts.some((q) => info.owner.get(q.work) != null)) {

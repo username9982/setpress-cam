@@ -509,55 +509,74 @@ namespace SetPressCam
             add("; 板厚 " + (Doc.Sheet.T != null ? Fmt(Doc.Sheet.T.Value) + " mm" : "未設定"), null, true);
             add(Model.ProgramText(Doc.Program), null, false);
             for (int i = 0; i < Doc.Tools.Count; i++) add("; T" + (i + 1) + " " + Model.ToolText(Doc.Tools[i]), null, true);
-            // ワークごとに F100〜（マクロ番号）と F110 で囲んでマクロに登録し、F23 で板の上の位置へ呼び出す
+            // ワークごとに F100〜（マクロ番号）と F110 で囲んでマクロに登録し、F23 で板の上の位置へ呼び出す。
+            // マクロの中には T 番号を書けないので、T はマクロの前に出し、金型が変わる所でマクロを分ける
             int macroNo = 100;
             foreach (var lay in Doc.Layouts)
             {
                 var k = Owner(lay.Work);
                 if (k == null) continue;
                 var o = WorkOrigin(k.Value);
-                int mno = macroNo++;
-                add("", null, false);
-                add("; S" + (k + 1) + " 割付  F" + mno + "〜F110 でマクロ " + mno + " に登録。F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法", null, true);
-                add("F" + mno, null, false);
-                if (lay.Src != HoleSrc(k.Value)) add("; ※ 割付のあとで図形が変わりました。もう一度自動割付してください", null, true);
-                Func<double, double, string, string> xy = (x, y, note) => "  " + ("X" + Fmt(x)).PadRight(8) + ("Y" + Fmt(y)).PadRight(8) + "; " + note;
-                int? curTool = null;
                 var hs = HitsOf(lay);
-                for (int i = 0; i < hs.Count; i++)
+                add("", null, false);
+                add("; S" + (k + 1) + " 割付  T → F100〜F110 でマクロに登録 → F23 で配置。F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法", null, true);
+                if (lay.Src != HoleSrc(k.Value)) add("; ※ 割付のあとで図形が変わりました。もう一度自動割付してください", null, true);
+                if (hs.Count == 0) { add("; 抜く所がありません", null, true); continue; }
+                // F23 のピッチ: 金型が抜く形を囲む四角 + 10 mm（多数個取りの間隔）
+                double bw = hs.Max(q => q.X1) - hs.Min(q => q.X0);
+                double bh = hs.Max(q => q.Y1) - hs.Min(q => q.Y0);
+                Func<double, double, string, string, string> xyi = (x, y, note, ind) => ind + ("X" + Fmt(x)).PadRight(8) + ("Y" + Fmt(y)).PadRight(8) + "; " + note;
+                Func<double, double, string, string> xy = (x, y, note) => xyi(x, y, note, "  ");
+                Func<double, double, string, string> mxy = (x, y, note) => xyi(x, y, note, "    ");
+                Action<string, string, bool> madd = (text, key, comment) => add("  " + text, key, comment);  // マクロの中は 1 段下げる
+                // 同じ金型が続くまとまりごとに、T → マクロ → F23 を出す
+                // （入る金型がない所は、金型を替えないのでいまのまとまりに入れる）
+                int? curTool = null;
+                for (int s0 = 0; s0 < hs.Count;)
                 {
-                    var h = hs[i];
-                    var t = ToolOf(h);
-                    string hk = HitKey(lay.Work, i);
-                    bool f13 = MacroOf(h) == "F13";
-                    bool single = MacroOf(h) == "単発";
-                    add(f13 ? "; " + (i + 1) + " 外形  F13: 開始点（左上）→ 外形 XY → 金型 XY → 角 R（金型寸法のぶん外側）"
-                        : "; " + (i + 1) + (h.Kind == "notch" ? " 切り欠き" : "") + (single ? "  単発: 金型の中心" : ""), hk, true);
-                    if (h.Tool != null && h.Tool != curTool) { add("T" + (h.Tool + 1), hk, false); curTool = h.Tool; }
-                    if (f13)
+                    int s1 = s0;
+                    int? tool = null;
+                    for (; s1 < hs.Count; s1++)
                     {
-                        var singles = F13Singles(h);
-                        if (singles.Count > 0) add("; 単発（短いほうの辺のつながりを、ミクロジョイントの長さまで先に抜く。F13 の帯と約 1/3 重ねる）  金型の中心", hk, true);
-                        foreach (var q in singles) add(xy((q.X0 + q.X1) / 2 - o.X, o.Y - (q.Y0 + q.Y1) / 2, "単発 中心"), hk, false);
+                        var tt = hs[s1].Tool;
+                        if (tt == null) continue;
+                        if (tool == null) tool = tt; else if (tt != tool) break;
                     }
-                    if (single) { add(xy((h.X0 + h.X1) / 2 - o.X, o.Y - (h.Y0 + h.Y1) / 2, "単発 中心"), hk, false); continue; }
-                    add(MacroOf(h), hk, false);
-                    add(xy(h.X0 - o.X, o.Y - h.Y1, "開始点"), hk, false);
-                    add(xy(h.X1 - h.X0, h.Y1 - h.Y0, f13 ? "外形" : "寸法"), hk, false);
-                    add(t != null && t.W != null && t.H != null ? xy(t.W.Value, t.H.Value, "金型") : "  ?       ?       ; 金型（入る長方形の金型がない）", hk, false);
-                    if (f13) add("  " + ("R" + Fmt(F13R(h))).PadRight(16) + "; 角 R" + ((h.Mj ?? 0) != 0 ? "（金型 + ミクロジョイント " + Fmt(h.Mj.Value) + "）" : ""), hk, false);
+                    int mno = macroNo++;
+                    if (tool != null && tool != curTool) { add("T" + (tool + 1), null, false); curTool = tool; }
+                    add("F" + mno, null, false);
+                    for (int i = s0; i < s1; i++)
+                    {
+                        var h = hs[i];
+                        var t = ToolOf(h);
+                        string hk = HitKey(lay.Work, i);
+                        bool f13 = MacroOf(h) == "F13";
+                        bool single = MacroOf(h) == "単発";
+                        madd(f13 ? "; " + (i + 1) + " 外形  F13: 開始点（左上）→ 外形 XY → 金型 XY → 角 R（金型寸法のぶん外側）"
+                            : "; " + (i + 1) + (h.Kind == "notch" ? " 切り欠き" : "") + (single ? "  単発: 金型の中心" : ""), hk, true);
+                        if (f13)
+                        {
+                            var singles = F13Singles(h);
+                            if (singles.Count > 0) madd("; 単発（短いほうの辺のつながりを、ミクロジョイントの長さまで先に抜く。F13 の帯と約 1/3 重ねる）  金型の中心", hk, true);
+                            foreach (var q in singles) add(mxy((q.X0 + q.X1) / 2 - o.X, o.Y - (q.Y0 + q.Y1) / 2, "単発 中心"), hk, false);
+                        }
+                        if (single) { add(mxy((h.X0 + h.X1) / 2 - o.X, o.Y - (h.Y0 + h.Y1) / 2, "単発 中心"), hk, false); continue; }
+                        madd(MacroOf(h), hk, false);
+                        add(mxy(h.X0 - o.X, o.Y - h.Y1, "開始点"), hk, false);
+                        add(mxy(h.X1 - h.X0, h.Y1 - h.Y0, f13 ? "外形" : "寸法"), hk, false);
+                        add(t != null && t.W != null && t.H != null ? mxy(t.W.Value, t.H.Value, "金型") : "    ?       ?       ; 金型（入る長方形の金型がない）", hk, false);
+                        if (f13) add("    " + ("R" + Fmt(F13R(h))).PadRight(16) + "; 角 R" + ((h.Mj ?? 0) != 0 ? "（金型 + ミクロジョイント " + Fmt(h.Mj.Value) + "）" : ""), hk, false);
+                    }
+                    add("F110", null, false);
+                    // F23: マクロ番号 → 板の原点（左上）からワーク原点までの XY → ピッチ XY → 列数 XY
+                    add("; F23: マクロ番号 → 板の原点からワーク原点まで XY → ピッチ XY（抜く形 + 10）→ 列数 XY", null, true);
+                    add("F23", null, false);
+                    add("  " + mno.ToString().PadRight(16) + "; マクロ番号", null, false);
+                    add(xy(SheetPos(k.Value, "x"), SheetPos(k.Value, "y"), "ワーク原点"), null, false);
+                    add(xy(bw + 10, bh + 10, "ピッチ"), null, false);
+                    add("  " + "1".PadRight(8) + "1".PadRight(8) + "; 列数", null, false);
+                    s0 = s1;
                 }
-                if (lay.Hits.Count == 0) add("; 抜く所がありません", null, true);
-                add("F110", null, false);
-                // F23: マクロ番号 → 板の原点（左上）からワーク原点までの XY → ピッチ（抜く形を囲む四角 + 10 mm）→ 列数 XY
-                double bw = hs.Count > 0 ? hs.Max(q => q.X1) - hs.Min(q => q.X0) : 0;
-                double bh = hs.Count > 0 ? hs.Max(q => q.Y1) - hs.Min(q => q.Y0) : 0;
-                add("; S" + (k + 1) + " 配置  F23: マクロ番号 → 板の原点からワーク原点まで XY → ピッチ XY（抜く形 + 10）→ 列数 XY", null, true);
-                add("F23", null, false);
-                add("  " + mno.ToString().PadRight(16) + "; マクロ番号", null, false);
-                add(xy(SheetPos(k.Value, "x"), SheetPos(k.Value, "y"), "ワーク原点"), null, false);
-                add(xy(bw + 10, bh + 10, "ピッチ"), null, false);
-                add("  " + "1".PadRight(8) + "1".PadRight(8) + "; 列数", null, false);
             }
             if (!Doc.Layouts.Any(q => Owner(q.Work) != null))
             {
