@@ -7,6 +7,7 @@
 - sw.js      の CACHE_NAME
 - index.html の style.css?v= / geom.js?v= / app.js?v=
   （新しい index.html が古い style.css や app.js と組み合わさらないように、版を URL に付ける）
+- Windows 版: windows/SetPressCam/Program.cs の VERSION、SetPressCam.csproj の <Version>、windows/build_win.py の VERSION
 """
 import re
 import sys
@@ -20,6 +21,9 @@ RULES = [
     ('index.html', r'(href="style\.css\?v=)[^"]+(")'),
     ('index.html', r'(src="geom\.js\?v=)[^"]+(")'),
     ('index.html', r'(src="app\.js\?v=)[^"]+(")'),
+    ('windows/SetPressCam/Program.cs', r'(VERSION = ")[^"]+(")'),
+    ('windows/SetPressCam/SetPressCam.csproj', r'(<Version>)[^<]+(</Version>)'),
+    ('windows/build_win.py', r'(?m)(^VERSION = ")[^"]+(")'),
 ]
 
 

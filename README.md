@@ -43,6 +43,9 @@ v0.4.0 までの四角穴（F3）はテスト用だったので消した。そ�
 | `sw.js` | オフライン用の Service Worker |
 | `icons/` | アイコン（`tools/make_icons.py` で作る） |
 | `tools/make_icons.py` | アイコンを作る開発用の道具（Python 標準ライブラリのみ） |
+| `windows/SetPressCam/` | Windows 版（C#、.NET 10、WinForms）。`Geom.cs` は `geom.js`、`Editor*.cs` は `app.js` の処理を移したもの |
+| `windows/setpresscam.iss` / `windows/build_win.py` | Windows 版のインストーラー（Inno Setup）と、それを作る開発用の道具 |
+| `windows/tests/make_cases.py` | Windows 版と Web 版の割付が同じか確かめる図面を作る開発用の道具 |
 
 ## PC で動かす
 
@@ -64,6 +67,29 @@ Service Worker（オフライン動作）は **HTTPS** でしか動かないた�
 
 保存した図面は、そのホーム画面のアプリの中に残る。Safari で開いたページとホーム画面のアプリでは保存場所が別になる。念のため「開く」→「ファイルに書き出す」でバックアップを取る。
 
+## Windows で使う
+
+Web 版と同じ仕様・同じ図面ファイル（「ファイルに書き出す」の JSON）で動く Windows 版がある。版の番号も Web 版とそろえる。
+
+- [Releases](https://github.com/username9982/setpress-cam/releases) の `SetPressCam-<版>-setup.exe` を実行して入れる（管理者権限は要らない。.NET 10 が入っていない PC では、同梱の .NET 10 デスクトップ ランタイムを入れるときだけ Windows の確認が出る）
+- マウスの左ボタンで描く・選ぶ・動かす。右ボタンか中ボタンのドラッグで画面を動かし、ホイールで拡大縮小。Ctrl+1〜4 でモード、Ctrl+Z で元に戻す、Del で削除、Home で全体表示
+- 「保存」は、図面 1 つを Web 版の書き出しと同じ形の JSON ファイルにする。Web 版で書き出したファイル（図面がいくつも入っているもの）も開ける（開く図面を選ぶ）
+- 作業中の図面・元に戻す履歴・設定は `%APPDATA%\SetPressCam` に自動保存する
+- 起動のとき（と「ヘルプ」→「更新の確認」）、GitHub Releases に新しい版があれば知らせる。「更新する」でインストーラーをダウンロードし（大きさと SHA-256 を確かめる）、画面を出さずに入れて起動し直す。「起動時に更新を確認する」で切れる
+- 画面は日本語だけ
+
+作り方（作る PC に .NET 10 SDK と Inno Setup 6 が要る。`windows/third_party/` に .NET 10 デスクトップ ランタイムのインストーラーを置く。`build_win.py` の RUNTIME_URL から取る。git には入れない）:
+
+```
+python windows/build_win.py
+```
+
+`windows/build/output/SetPressCam-<版>-setup.exe` ができる。これを GitHub Releases に付けて公開する（タグは `v<版>`）と、入っているアプリが更新を見つける。
+
+```
+gh release create v0.17.6 windows/build/output/SetPressCam-0.17.6-setup.exe --title "v0.17.6"
+```
+
 ## 更新するとき
 
 中身を変えたら、版を上げる。
@@ -72,6 +98,7 @@ Service Worker（オフライン動作）は **HTTPS** でしか動かないた�
 python tools/bump_version.py 0.2.1
 ```
 
-`app.js` の `APP_VERSION`、`sw.js` の `CACHE_NAME`、`index.html` の `style.css?v=` / `geom.js?v=` / `app.js?v=` をまとめて書き換える。
+`app.js` の `APP_VERSION`、`sw.js` の `CACHE_NAME`、`index.html` の `style.css?v=` / `geom.js?v=` / `app.js?v=`、Windows 版の版（`Program.cs`、`SetPressCam.csproj`、`build_win.py`）をまとめて書き換える。
+割付やコードの作り方を変えたときは、Windows 版の `Geom.cs` / `Editor*.cs` にも同じ変更を入れ、`windows/tests/README.md` の手順で結果が同じか確かめる。
 URL に版を付けるのは、更新の直後に新しい `index.html` と古い `style.css`（キャッシュに残ったもの）が組み合わさって画面が崩れるのを防ぐため（v0.2.0 で、描く領域が消えた）。
 Service Worker はネットにつながっていれば新しいファイルを取り、つながっていなければ前に取ったファイルで動く。

@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- セットプレス CAM の Windows 版。ビルド: python windows/build_win.py（dotnet publish で .NET 10 デスクトップ ランタイムで
+       動く SetPressCam.exe 1 つを作り、Inno Setup でインストーラーにする）。 -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>SetPressCam</AssemblyName>
+    <RootNamespace>SetPressCam</RootNamespace>
+    <Version>0.17.6</Version>
+    <Product>SetPressCam</Product>
+    <AssemblyTitle>セットプレス CAM</AssemblyTitle>
+    <Copyright></Copyright>
+    <ApplicationIcon>setpresscam.ico</ApplicationIcon>
+    <!-- Domino と同じく高 DPI 非対応（manifest に DPI の項目を書かない。Program.cs でも DpiUnaware にする） -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>DpiUnaware</ApplicationHighDpiMode>
+    <ApplicationUseCompatibleTextRendering>false</ApplicationUseCompatibleTextRendering>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- WFO1000: デザイナーのためのプロパティの警告（このアプリはデザイナーを使わない） -->
+    <NoWarn>$(NoWarn);WFO1000</NoWarn>
+  </PropertyGroup>
+</Project>

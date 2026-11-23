@@ -1,7 +1,8 @@
 """PWA のアイコン（PNG）を標準ライブラリだけで作る開発用の道具。
 
 使い方: python tools/make_icons.py
-出力:   icons/icon-192.png, icons/icon-512.png, icons/apple-touch-icon.png
+出力:   icons/icon-192.png, icons/icon-512.png, icons/apple-touch-icon.png、
+        windows/SetPressCam/setpresscam.ico（Windows 版のアイコン。16・24・32・48・256 px の PNG を入れた ICO）
 絵柄:   紺の地に、白い板と、その上に置いた橙の四角形（描画した四角形のイメージ）。
 """
 import struct
@@ -62,6 +63,17 @@ def main() -> None:
     for name, size in [('icon-192.png', 192), ('icon-512.png', 512), ('apple-touch-icon.png', 180)]:
         (out / name).write_bytes(png(size))
         print('wrote', out / name)
+    sizes = [16, 24, 32, 48, 256]
+    images = [png(n) for n in sizes]
+    head = struct.pack('<HHH', 0, 1, len(sizes))
+    offset = 6 + 16 * len(sizes)
+    dirs = b''
+    for n, data in zip(sizes, images):
+        dirs += struct.pack('<BBBBHHII', n % 256, n % 256, 0, 0, 1, 32, len(data), offset)
+        offset += len(data)
+    ico = ROOT / 'windows' / 'SetPressCam' / 'setpresscam.ico'
+    ico.write_bytes(head + dirs + b''.join(images))
+    print('wrote', ico)
 
 
 if __name__ == '__main__':
