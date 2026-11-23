@@ -899,8 +899,7 @@ namespace SetPressCam
                 var f = F23Of(lay);
                 if (f.X0 < -1e-6 || f.Y1 > Doc.Sheet.H + 1e-6 || f.X1 + (f.Nx - 1) * f.Px > Doc.Sheet.W + 1e-6 || f.Y0 - (f.Ny - 1) * f.Py < -1e-6)
                     add("; ※ 多数個取りの並びが板からはみ出します", null, true);
-                if ((f.Nx > 1 && f.Px < f.X1 - f.X0 - 1e-6) || (f.Ny > 1 && f.Py < f.Y1 - f.Y0 - 1e-6))
-                    add("; ※ ピッチが抜く形より小さく、となりと重なります", null, true);
+                // ピッチを抜く形より狭めて重ねるのは、材料を節約するためにわざとすることがあるので注意しない（プレビューで目で確かめる）
                 bool pitchAuto = lay.Px == null && lay.Py == null;
                 Func<double, double, string, string, string> xyi = (x, y, note, ind) => ind + ("X" + Fmt(x)).PadRight(8) + ("Y" + Fmt(y)).PadRight(8) + "; " + note;
                 Func<double, double, string, string> xy = (x, y, note) => xyi(x, y, note, "  ");

@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.17.12';
+const APP_VERSION = '0.17.13';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -2058,8 +2058,7 @@ function genCode() {
     const f = f23Of(lay);
     if (f.x0 < -1e-6 || f.y1 > doc.sheet.h + 1e-6 || f.x1 + (f.nx - 1) * f.px > doc.sheet.w + 1e-6 || f.y0 - (f.ny - 1) * f.py < -1e-6)
       add('; ※ 多数個取りの並びが板からはみ出します', null, true);
-    if ((f.nx > 1 && f.px < f.x1 - f.x0 - 1e-6) || (f.ny > 1 && f.py < f.y1 - f.y0 - 1e-6))
-      add('; ※ ピッチが抜く形より小さく、となりと重なります', null, true);
+    // ピッチを抜く形より狭めて重ねるのは、材料を節約するためにわざとすることがあるので注意しない（プレビューで目で確かめる）
     const pitchAuto = lay.px == null && lay.py == null;
     const xy = (x, y, note, ind = '  ') => `${ind}${('X' + fmt(x)).padEnd(8)}${('Y' + fmt(y)).padEnd(8)}; ${note}`;
     // 同じ金型が続くまとまりごとに、T → マクロ → F23 を出す
