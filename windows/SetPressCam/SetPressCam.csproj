@@ -10,7 +10,7 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>SetPressCam</AssemblyName>
     <RootNamespace>SetPressCam</RootNamespace>
-    <Version>0.17.7</Version>
+    <Version>0.17.8</Version>
     <Product>SetPressCam</Product>
     <AssemblyTitle>セットプレス CAM</AssemblyTitle>
     <Copyright></Copyright>

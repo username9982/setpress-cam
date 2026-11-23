@@ -509,13 +509,17 @@ namespace SetPressCam
             add("; 板厚 " + (Doc.Sheet.T != null ? Fmt(Doc.Sheet.T.Value) + " mm" : "未設定"), null, true);
             add(Model.ProgramText(Doc.Program), null, false);
             for (int i = 0; i < Doc.Tools.Count; i++) add("; T" + (i + 1) + " " + Model.ToolText(Doc.Tools[i]), null, true);
+            // ワークごとに F100〜（マクロ番号）と F110 で囲んでマクロに登録し、F23 で板の上の位置へ呼び出す
+            int macroNo = 100;
             foreach (var lay in Doc.Layouts)
             {
                 var k = Owner(lay.Work);
                 if (k == null) continue;
                 var o = WorkOrigin(k.Value);
+                int mno = macroNo++;
                 add("", null, false);
-                add("; S" + (k + 1) + " 割付  F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法", null, true);
+                add("; S" + (k + 1) + " 割付  F" + mno + "〜F110 でマクロ " + mno + " に登録。F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法", null, true);
+                add("F" + mno, null, false);
                 if (lay.Src != HoleSrc(k.Value)) add("; ※ 割付のあとで図形が変わりました。もう一度自動割付してください", null, true);
                 Func<double, double, string, string> xy = (x, y, note) => "  " + ("X" + Fmt(x)).PadRight(8) + ("Y" + Fmt(y)).PadRight(8) + "; " + note;
                 int? curTool = null;
@@ -544,6 +548,16 @@ namespace SetPressCam
                     if (f13) add("  " + ("R" + Fmt(F13R(h))).PadRight(16) + "; 角 R" + ((h.Mj ?? 0) != 0 ? "（金型 + ミクロジョイント " + Fmt(h.Mj.Value) + "）" : ""), hk, false);
                 }
                 if (lay.Hits.Count == 0) add("; 抜く所がありません", null, true);
+                add("F110", null, false);
+                // F23: マクロ番号 → 板の原点（左上）からワーク原点までの XY → ピッチ（抜く形を囲む四角 + 10 mm）→ 列数 XY
+                double bw = hs.Count > 0 ? hs.Max(q => q.X1) - hs.Min(q => q.X0) : 0;
+                double bh = hs.Count > 0 ? hs.Max(q => q.Y1) - hs.Min(q => q.Y0) : 0;
+                add("; S" + (k + 1) + " 配置  F23: マクロ番号 → 板の原点からワーク原点まで XY → ピッチ XY（抜く形 + 10）→ 列数 XY", null, true);
+                add("F23", null, false);
+                add("  " + mno.ToString().PadRight(16) + "; マクロ番号", null, false);
+                add(xy(SheetPos(k.Value, "x"), SheetPos(k.Value, "y"), "ワーク原点"), null, false);
+                add(xy(bw + 10, bh + 10, "ピッチ"), null, false);
+                add("  " + "1".PadRight(8) + "1".PadRight(8) + "; 列数", null, false);
             }
             if (!Doc.Layouts.Any(q => Owner(q.Work) != null))
             {
