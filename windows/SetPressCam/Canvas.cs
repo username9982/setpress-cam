@@ -26,10 +26,11 @@ namespace SetPressCam
         // ドラッグの状態
         class Drag
         {
-            public string Kind;  // stroke / press / move / pan
+            public string Kind;  // stroke / press / move / box / pan
             public List<V> Raw;
             public Sel Hit;
             public System.Drawing.Point Start;
+            public System.Drawing.Point Cur;  // box: いまのマウスの位置
             public V World;
             // move
             public List<Sel> Items;
@@ -177,6 +178,7 @@ namespace SetPressCam
             foreach (var p in doc.Points) DrawPoint(g, p);
             for (int k = 0; k < ed.Info.Outers.Count; k++) DrawOrigin(g, ed.WorkOrigin(k), k);
             if (drag != null && drag.Kind == "stroke") DrawStroke(g);
+            if (drag != null && drag.Kind == "box") DrawBox(g);
         }
 
         GraphicsPath PolyPath(List<V> poly)
@@ -413,6 +415,15 @@ namespace SetPressCam
             });
         }
 
+        // 「移動」で何もない所からなぞった、選ぶ範囲の四角
+        void DrawBox(Graphics g)
+        {
+            var r = new RectangleF(Math.Min(drag.Start.X, drag.Cur.X), Math.Min(drag.Start.Y, drag.Cur.Y),
+                Math.Abs(drag.Cur.X - drag.Start.X), Math.Abs(drag.Cur.Y - drag.Start.Y));
+            using (var b = new SolidBrush(Color.FromArgb(26, COLOR.Selected))) g.FillRectangle(b, r);
+            using (var p = new Pen(COLOR.Selected, 1.5f) { DashPattern = new[] { 6 / 1.5f, 4 / 1.5f } }) g.DrawRectangle(p, r.X, r.Y, r.Width, r.Height);
+        }
+
         // なぞっている途中: 指の跡（灰色）と、できあがる折れ線（点線）
         void DrawStroke(Graphics g)
         {
@@ -591,9 +602,22 @@ namespace SetPressCam
                 Invalidate();
                 return;
             }
+            if (drag.Kind == "box")
+            {
+                drag.Cur = Mp(e);
+                Invalidate();
+                return;
+            }
             if (drag.Kind == "press")
             {
                 var h = drag.Hit;
+                // 何もない所から 8px なぞったら、四角の枠で選ぶ
+                if (ed.Mode == "move" && h == null && Geo.Hypot(Mx(e) - drag.Start.X, My(e) - drag.Start.Y) > 8)
+                {
+                    drag = new Drag { Kind = "box", Start = drag.Start, Cur = Mp(e) };
+                    Invalidate();
+                    return;
+                }
                 if (ed.Mode == "move" && h != null && Geo.Hypot(Mx(e) - drag.Start.X, My(e) - drag.Start.Y) > 8) StartMove(h);
             }
             if (drag != null && drag.Kind == "move") DoMove(w);
@@ -685,6 +709,14 @@ namespace SetPressCam
                 else if (ed.Mode == "move") ed.TapSelectMany(d.Hit);
                 else if (ed.Mode == "layout") ed.TapWork(d.Hit, d.World, Scale);
                 SelectionChanged?.Invoke();
+            }
+            else if (d.Kind == "box")
+            {
+                var a = ToWorld(Math.Min(d.Start.X, d.Cur.X), Math.Max(d.Start.Y, d.Cur.Y));
+                var b = ToWorld(Math.Max(d.Start.X, d.Cur.X), Math.Min(d.Start.Y, d.Cur.Y));
+                ed.BoxSelect(a.X, a.Y, b.X, b.Y);
+                SelectionChanged?.Invoke();
+                Invalidate();
             }
             else if (d.Kind == "move")
             {

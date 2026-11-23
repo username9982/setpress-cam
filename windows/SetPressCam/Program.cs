@@ -12,7 +12,7 @@ namespace SetPressCam
     static class Program
     {
         /// <summary>版。Web 版の APP_VERSION と同じ番号にする（SetPressCam.csproj の Version、build_win.py の VERSION も）。</summary>
-        public const string VERSION = "0.17.9";
+        public const string VERSION = "0.17.10";
 
         /// <summary>配った形（インストールしたもの・ポータブル版）か。exe の横にライセンス表記がある。開発中の exe は false。</summary>
         public static bool Packaged

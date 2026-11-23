@@ -309,6 +309,28 @@ namespace SetPressCam
             else Sel = Sel.Concat(new[] { hit }).ToList();
         }
 
+        // 四角の枠で選ぶ（「移動」）: 枠にすっぽり入るものを、いまの選択に足す。
+        // 外形がまるごと入れば、その外形の原点を選ぶ（穴・切り欠き・割付・板の原点からの寸法ごと動く）。
+        // ほかは、両端が枠に入る線を選ぶ
+        public void BoxSelect(double x0, double y0, double x1, double y1)
+        {
+            Func<Point, bool> inside = p => p.X >= x0 && p.X <= x1 && p.Y >= y0 && p.Y <= y1;
+            var add = new List<Sel>();
+            var whole = new HashSet<int>();
+            for (int k = 0; k < Info.Outers.Count; k++)
+            {
+                var pts = Doc.Points.Where(p => Owner(p.Id) == k).ToList();
+                if (pts.Count > 0 && pts.All(inside)) { whole.Add(k); add.Add(new Sel("origin", k)); }
+            }
+            foreach (var l in Doc.Lines)
+            {
+                int? ka = Owner(l.A), kb = Owner(l.B);
+                if (ka != null && kb != null && whole.Contains(ka.Value) && whole.Contains(kb.Value)) continue;
+                if (inside(P(l.A)) && inside(P(l.B))) add.Add(new Sel("line", l.Id));
+            }
+            Sel = Sel.Concat(add.Where(q => !IsSel(q.T, q.Id))).ToList();
+        }
+
         public void TapSelect(Sel hit)
         {
             if (hit == null) Sel = new List<Sel>();

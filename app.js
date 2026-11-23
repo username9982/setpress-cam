@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.17.9';
+const APP_VERSION = '0.17.10';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -290,6 +290,20 @@ function draw() {
   for (const p of doc.points) drawPoint(p);
   info.outers.forEach((fr, k) => drawOrigin(workOrigin(k), k));
   if (drag && drag.kind === 'stroke') drawStroke();
+  if (drag && drag.kind === 'box') drawBox();
+}
+
+// 「移動」で何もない所からなぞった、選ぶ範囲の四角
+function drawBox() {
+  const [ax, ay] = drag.start, [bx, by] = drag.cur;
+  ctx.save();
+  ctx.fillStyle = 'rgba(232, 137, 12, 0.10)';
+  ctx.strokeStyle = COLOR.selected;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 4]);
+  ctx.fillRect(Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay));
+  ctx.strokeRect(Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay));
+  ctx.restore();
 }
 
 // 閉じた図形の内側を半透明で塗る。外形を塗ってから、穴・切り欠きの形で抜く。
@@ -702,7 +716,7 @@ function hitTest(sx, sy) {
 // 指1本: 作図ではなぞって描く、寸法ではタップで選ぶ、移動ではつかんで動かす。指2本: 拡大縮小と画面の移動。
 let mode = 'draw';
 const pointers = new Map();
-let drag = null;  // {kind:'stroke'|'press'|'move'|'pinch', ...}
+let drag = null;  // {kind:'stroke'|'press'|'move'|'box'|'pinch', ...}
 
 function eventPos(e) {
   const rect = canvas.getBoundingClientRect();
@@ -769,10 +783,19 @@ canvas.addEventListener('pointermove', (e) => {
   } else if (drag.kind === 'stroke') {
     drag.raw.push({ x: wx, y: wy });
     draw();
+  } else if (drag.kind === 'box') {
+    drag.cur = pos;
+    draw();
   } else if (drag.kind === 'press') {
     // 「移動」で点か線を押したまま 8px 動いたら、選んだものをまとめて動かし始める。
     // 選んでいないものをつかんだときは、それだけを選び直して動かす
     const h = drag.hit;
+    // 何もない所から 8px なぞったら、四角の枠で選ぶ
+    if (mode === 'move' && !h && Math.hypot(pos[0] - drag.start[0], pos[1] - drag.start[1]) > 8) {
+      drag = { kind: 'box', start: drag.start, cur: pos };
+      draw();
+      return;
+    }
     if (mode === 'move' && h && Math.hypot(pos[0] - drag.start[0], pos[1] - drag.start[1]) > 8) {
       if (!isSel(h.t, h.id)) sel = [h];
       snapshot();
@@ -854,6 +877,9 @@ function endPointer(e) {
     if (mode === 'dim') tapSelect(d.hit);
     else if (mode === 'move') tapSelectMany(d.hit);
     else if (mode === 'layout') tapWork(d.hit, d.world);
+  } else if (d.kind === 'box') {
+    if (e.type !== 'pointercancel') boxSelect(d.start, d.cur);
+    draw();
   } else if (d.kind === 'move') {
     const movedAny = doc.points.some((p, i) => p.x !== d.orig[i].x || p.y !== d.orig[i].y) ||
       d.dims.some((m) => { const q = D(m.id); return q && q.off !== m.before; });
@@ -871,6 +897,26 @@ function tapSelectMany(hit) {
   else sel = [...sel, hit];
   updateUi();
   draw();
+}
+// 四角の枠で選ぶ（「移動」）: 枠にすっぽり入るものを、いまの選択に足す。
+// 外形がまるごと入れば、その外形の原点を選ぶ（穴・切り欠き・割付・板の原点からの寸法ごと動く）。
+// ほかは、両端が枠に入る線を選ぶ
+function boxSelect(a, b) {
+  const [x0, y1] = toWorld(Math.min(a[0], b[0]), Math.min(a[1], b[1]));
+  const [x1, y0] = toWorld(Math.max(a[0], b[0]), Math.max(a[1], b[1]));
+  const inside = (p) => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1;
+  const add = [];
+  const whole = new Set();
+  info.outers.forEach((fr, k) => {
+    const pts = doc.points.filter((p) => info.owner.get(p.id) === k);
+    if (pts.length && pts.every(inside)) { whole.add(k); add.push({ t: 'origin', id: k }); }
+  });
+  for (const l of doc.lines) {
+    if (whole.has(info.owner.get(l.a)) && whole.has(info.owner.get(l.b))) continue;
+    if (inside(P(l.a)) && inside(P(l.b))) add.push({ t: 'line', id: l.id });
+  }
+  sel = [...sel, ...add.filter((q) => !isSel(q.t, q.id))];
+  updateUi();
 }
 function tapSelect(hit) {
   if (!hit) sel = [];
