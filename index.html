@@ -23,7 +23,7 @@
   [hidden] { display: none !important; }
   #stage { position: relative; flex: 1; min-width: 0; min-height: 0; }
 </style>
-<link rel="stylesheet" href="style.css?v=0.17.11">
+<link rel="stylesheet" href="style.css?v=0.17.12">
 <!-- ?v= は tools/bump_version.py で書き換える。古い style.css・app.js と組み合わさらないようにするため -->
 </head>
 <body>
@@ -87,9 +87,19 @@
   <div class="code-head">
     <span class="code-title">コード</span>
     <span class="code-note">機械に入力するデータ</span>
+    <button id="btn-code-edit" type="button">編集</button>
     <button id="btn-copy" type="button">コピー</button>
   </div>
   <div id="code" role="textbox" aria-readonly="true" aria-multiline="true" aria-label="コード"></div>
+  <div id="code-edit" hidden>
+    <textarea id="code-text" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" aria-label="コードを書き換える"></textarea>
+    <ul id="code-err"></ul>
+    <div class="code-edit-bar">
+      <span class="code-edit-note">F3・F13・単発・T・F23 を書き換えて「反映」</span>
+      <button id="btn-code-cancel" type="button">やめる</button>
+      <button id="btn-code-apply" type="button" class="primary">反映</button>
+    </div>
+  </div>
 </aside>
 </div>
 
@@ -156,7 +166,7 @@
   </form>
 </dialog>
 
-<script src="geom.js?v=0.17.11"></script>
-<script src="app.js?v=0.17.11"></script>
+<script src="geom.js?v=0.17.12"></script>
+<script src="app.js?v=0.17.12"></script>
 </body>
 </html>

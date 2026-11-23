@@ -163,6 +163,20 @@ input[type=number], input[type=text], select {
   background: #fffbe8; color: inherit; line-height: 1.3;
 }
 #code .code-in:focus { outline: 2px solid #e8890c; outline-offset: 0; }
+/* コードを文字で書き換える */
+#code[hidden], #code-edit[hidden], #btn-code-edit[hidden] { display: none; }
+#code-edit { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#code-text {
+  flex: 1; min-height: 0; resize: none; border: none; outline: none; padding: 6px 10px;
+  font-family: ui-monospace, Menlo, Consolas, "Courier New", monospace; font-size: 15px; line-height: 1.6;
+  background: #fffef6; white-space: pre; overflow: auto;
+}
+#code-err { margin: 0; padding: 0; list-style: none; max-height: 30%; overflow: auto; }
+#code-err:empty { display: none; }
+#code-err li { padding: 4px 10px; color: #b3261e; font-size: 13px; border-top: 1px solid var(--line); cursor: pointer; }
+.code-edit-bar { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-top: 1px solid var(--line); background: #eef1f4; }
+.code-edit-note { margin-right: auto; font-size: 12px; color: #667; }
+.code-edit-bar button { min-height: 36px; }
 
 #canvas {
   position: absolute;

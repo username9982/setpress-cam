@@ -551,6 +551,326 @@ namespace SetPressCam
             Changed();
         }
 
+        // ---- コードを読む（手で書き換えたコードを割付に戻す。app.js の parseCode / applyCode と同じ） ----
+        // 書き方は GenCode と同じ: T → F100〜F109 … F110（中に F3・F13・単発）→ F23。「;」から後ろはコメント。
+        // どのワークのマクロかは、F23 のワーク原点（板の原点から）で決める。座標は、いまのワーク原点から測る。
+        public class CodeError { public int Line; public string Msg; }
+        const double CODE_EPS = 0.0015;  // コードの数は 0.001 mm に丸めてあるので、そのぶんは同じとみなす
+        static bool NearC(double a, double b) { return Math.Abs(a - b) < CODE_EPS; }
+
+        class PHit { public int? Tool; public double X0, Y0, X1, Y1; public string Macro; public double Mj; }
+        class PMacro { public int No, Line; public List<PHit> Hits = new List<PHit>(); }
+        class PPlace { public int No, K, Nx, Ny, Line; public double Px, Py; }
+        class PExp { public string Macro; public int Line; public int? Tool; public PMacro Mac; public List<double[]> Vals = new List<double[]>(); }
+        class PF23 { public int Line; public List<double[]> Vals = new List<double[]>(); }
+        class ParseResult
+        {
+            public List<CodeError> Errs = new List<CodeError>();
+            public bool HasProgram; public int? Program;
+            public List<PPlace> Places = new List<PPlace>();
+            public List<PMacro> MacroList = new List<PMacro>();
+            public Dictionary<int, PMacro> Macros = new Dictionary<int, PMacro>();
+        }
+
+        const string NUM = "(-?[0-9]+(?:\\.[0-9]+)?|-?\\.[0-9]+)";
+        static readonly System.Text.RegularExpressions.Regex RE_XY = new System.Text.RegularExpressions.Regex("^X" + NUM + "Y" + NUM + "$");
+        static readonly System.Text.RegularExpressions.Regex RE_R = new System.Text.RegularExpressions.Regex("^R" + NUM + "$");
+        static double PNum(string s) { return double.Parse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture); }
+
+        ParseResult ParseCode(string text)
+        {
+            var r = new ParseResult();
+            Action<int, string> err = (line, msg) => r.Errs.Add(new CodeError { Line = line, Msg = msg });
+            int? tool = null;
+            PMacro mac = null;
+            PExp exp = null;
+            PF23 f23 = null;
+            Func<int?, int, Tool> rectTool = (t, line) =>
+            {
+                if (t == null) { err(line, "T で金型を選んでから書いてください"); return null; }
+                var q = t.Value < Doc.Tools.Count ? Doc.Tools[t.Value] : null;
+                if (q == null || q.Shape != "rect" || !(q.W > 0) || !(q.H > 0)) { err(line, "T" + (t + 1) + " は長方形の金型ではありません"); return null; }
+                return q;
+            };
+            Action<PExp> finishHit = e =>
+            {
+                double[] st = e.Vals[0], sz = e.Vals[1], tl = e.Vals[2];
+                if (!(sz[0] > 0 && sz[1] > 0)) { err(e.Line, (e.Macro == "F13" ? "外形" : "寸法") + "は 0 より大きくしてください"); return; }
+                Tool t = null;
+                if (tl != null)
+                {
+                    t = rectTool(e.Tool, e.Line);
+                    if (t == null) return;
+                    if (!NearC(t.W.Value, tl[0]) || !NearC(t.H.Value, tl[1]))
+                    {
+                        err(e.Line, "金型 X" + Fmt(tl[0]) + " Y" + Fmt(tl[1]) + " が T" + (e.Tool + 1) + "（" + Model.ToolText(t) + "）と合いません");
+                        return;
+                    }
+                }
+                var h = new PHit { Tool = t != null ? e.Tool : null, X0 = st[0], Y0 = -st[1] - sz[1], X1 = st[0] + sz[0], Y1 = -st[1] };
+                if (e.Macro == "F13")
+                {
+                    h.Macro = "F13";
+                    double rr = e.Vals[3][0];
+                    if (NearC(rr, 0) || t == null) h.Mj = 0;
+                    else
+                    {
+                        double bs = Math.Max(t.W.Value, t.H.Value);
+                        if (rr <= bs + 1e-9) { err(e.Line, "角 R は 0 か、金型の長いほうの寸法 " + Fmt(bs) + " より大きくしてください"); return; }
+                        h.Mj = Round(rr - bs);
+                    }
+                    // すぐ前の単発が、この F13 の前に抜く単発（ミクロジョイントの余り）と同じなら、F13 から作り直すので外す
+                    var derived = F13Singles(new Hit { Macro = "F13", Tool = h.Tool, Mj = h.Mj, X0 = h.X0, Y0 = h.Y0, X1 = h.X1, Y1 = h.Y1 });
+                    if (derived.Count > 0 && e.Mac != null && e.Mac.Hits.Count >= derived.Count)
+                    {
+                        var tail = e.Mac.Hits.Skip(e.Mac.Hits.Count - derived.Count).ToList();
+                        bool same = true;
+                        for (int i = 0; i < tail.Count && same; i++)
+                            same = tail[i].Macro == "単発" && tail[i].Tool == h.Tool
+                                && NearC((tail[i].X0 + tail[i].X1) / 2, (derived[i].X0 + derived[i].X1) / 2)
+                                && NearC((tail[i].Y0 + tail[i].Y1) / 2, (derived[i].Y0 + derived[i].Y1) / 2);
+                        if (same) e.Mac.Hits.RemoveRange(e.Mac.Hits.Count - derived.Count, derived.Count);
+                    }
+                }
+                if (e.Mac != null) e.Mac.Hits.Add(h);
+            };
+            Action<PF23> finishF23 = f =>
+            {
+                int no = (int)f.Vals[0][0];
+                double[] org = f.Vals[1], pitch = f.Vals[2], cnt = f.Vals[3];
+                if (!r.Macros.ContainsKey(no)) { err(f.Line, "マクロ " + no + "（F" + no + "）がありません"); return; }
+                if (r.Places.Any(p => p.No == no)) { err(f.Line, "マクロ " + no + " を 2 回配置しています"); return; }
+                int k = -1;
+                for (int i = 0; i < Info.Outers.Count && k < 0; i++)
+                    if (NearC(SheetPos(i, "x"), org[0]) && NearC(SheetPos(i, "y"), org[1])) k = i;
+                if (k < 0) { err(f.Line, "板の原点から X" + Fmt(org[0]) + " Y" + Fmt(org[1]) + " にワーク原点がありません（ワークは図面で動かしてください）"); return; }
+                if (!(pitch[0] > 0 && pitch[1] > 0)) { err(f.Line, "ピッチは 0 より大きくしてください"); return; }
+                if (cnt.Any(n => n < 1 || n > F23_MAX)) { err(f.Line, "列数は 1〜" + F23_MAX + " にしてください"); return; }
+                r.Places.Add(new PPlace { No = no, K = k, Px = pitch[0], Py = pitch[1], Nx = (int)cnt[0], Ny = (int)cnt[1], Line = f.Line });
+            };
+            var rows = (text ?? "").Split('\n');
+            for (int idx = 0; idx < rows.Length; idx++)
+            {
+                int line = idx + 1;
+                string norm = rows[idx].TrimEnd('\r').Normalize(System.Text.NormalizationForm.FormKC);  // 全角の「；」もコメント
+                int sc = norm.IndexOf(';');
+                string body = System.Text.RegularExpressions.Regex.Replace((sc >= 0 ? norm.Substring(0, sc) : norm).ToUpperInvariant(), "\\s+", " ").Trim();
+                if (body == "") continue;
+                string c = body.Replace(" ", "");
+                System.Text.RegularExpressions.Match m;
+                if (exp != null)
+                {
+                    int step = exp.Vals.Count;
+                    if (exp.Macro == "F13" && step == 3)
+                    {
+                        m = RE_R.Match(c);
+                        if (!m.Success) { err(line, "角 R（R0 など）を書いてください"); exp = null; continue; }
+                        exp.Vals.Add(new[] { PNum(m.Groups[1].Value) });
+                    }
+                    else if (step == 2 && c == "??") exp.Vals.Add(null);  // 入る金型がない
+                    else
+                    {
+                        m = RE_XY.Match(c);
+                        if (!m.Success)
+                        {
+                            err(line, new[] { "開始点", exp.Macro == "F13" ? "外形" : "寸法", "金型" }[step] + "の X Y を書いてください（例: X50 Y20）");
+                            exp = null;
+                            continue;
+                        }
+                        exp.Vals.Add(new[] { PNum(m.Groups[1].Value), PNum(m.Groups[2].Value) });
+                    }
+                    if (exp.Vals.Count == (exp.Macro == "F13" ? 4 : 3)) { finishHit(exp); exp = null; }
+                    continue;
+                }
+                if (f23 != null)
+                {
+                    int step = f23.Vals.Count;
+                    if (step == 0)
+                    {
+                        if (!System.Text.RegularExpressions.Regex.IsMatch(c, "^[0-9]+$")) { err(line, "マクロ番号を書いてください（例: 100）"); f23 = null; continue; }
+                        f23.Vals.Add(new[] { PNum(c) });
+                    }
+                    else if (step < 3)
+                    {
+                        m = RE_XY.Match(c);
+                        if (!m.Success) { err(line, (step == 1 ? "ワーク原点" : "ピッチ") + "の X Y を書いてください"); f23 = null; continue; }
+                        f23.Vals.Add(new[] { PNum(m.Groups[1].Value), PNum(m.Groups[2].Value) });
+                    }
+                    else
+                    {
+                        m = System.Text.RegularExpressions.Regex.Match(body, "^([0-9]+) ([0-9]+)$");
+                        if (!m.Success) { err(line, "列数を 2 つの整数で書いてください（例: 2 3）"); f23 = null; continue; }
+                        f23.Vals.Add(new[] { PNum(m.Groups[1].Value), PNum(m.Groups[2].Value) });
+                    }
+                    if (f23.Vals.Count == 4) { finishF23(f23); f23 = null; }
+                    continue;
+                }
+                if ((m = System.Text.RegularExpressions.Regex.Match(c, "^O([0-9]+|-+)$")).Success)
+                {
+                    if (m.Groups[1].Value.StartsWith("-")) { r.HasProgram = true; r.Program = null; }
+                    else
+                    {
+                        double n = PNum(m.Groups[1].Value);
+                        if (n < Model.PROGRAM_MIN || n > Model.PROGRAM_MAX) err(line, "プログラム番号は " + Model.PROGRAM_MIN + "〜" + Model.PROGRAM_MAX + " にしてください");
+                        else { r.HasProgram = true; r.Program = (int)n; }
+                    }
+                }
+                else if ((m = System.Text.RegularExpressions.Regex.Match(c, "^T([0-9]+)$")).Success)
+                {
+                    double n = PNum(m.Groups[1].Value);
+                    if (mac != null) err(line, "マクロ（F100〜F110）の中には T を書けません");
+                    else if (n < 1 || n > Doc.Tools.Count || Doc.Tools[(int)n - 1].Shape == "none") err(line, "T" + Js.Num(n) + " の金型がありません（「金型」で決めてください）");
+                    else tool = (int)n - 1;
+                }
+                else if ((m = System.Text.RegularExpressions.Regex.Match(c, "^F([0-9]+)$")).Success)
+                {
+                    double f = PNum(m.Groups[1].Value);
+                    if (f == 3 || f == 13)
+                    {
+                        if (mac == null) err(line, "F" + Js.Num(f) + " は F100〜F110 の中に書いてください");
+                        exp = new PExp { Macro = f == 13 ? "F13" : "F3", Line = line, Tool = tool, Mac = mac };
+                    }
+                    else if (f >= 100 && f <= 109)
+                    {
+                        if (mac != null) err(line, "F110 でマクロ " + mac.No + " を閉じてから書いてください");
+                        else if (r.Macros.ContainsKey((int)f)) err(line, "マクロ " + Js.Num(f) + " が 2 回あります");
+                        else { mac = new PMacro { No = (int)f, Line = line }; r.Macros[(int)f] = mac; r.MacroList.Add(mac); }
+                    }
+                    else if (f == 110)
+                    {
+                        if (mac == null) err(line, "F110 の前に F100〜F109 がありません");
+                        mac = null;
+                    }
+                    else if (f == 23)
+                    {
+                        if (mac != null) err(line, "F23 は F110 のあとに書いてください");
+                        f23 = new PF23 { Line = line };
+                    }
+                    else err(line, "F" + Js.Num(f) + " はここでは使えません（F3・F13・F23・F100〜F110）");
+                }
+                else if ((m = RE_XY.Match(c)).Success)
+                {
+                    // マクロの中の X Y だけの行は単発（金型の中心）
+                    if (mac == null) { err(line, "単発（X Y）は F100〜F110 の中に書いてください"); continue; }
+                    var t = rectTool(tool, line);
+                    if (t == null) continue;
+                    double cx = PNum(m.Groups[1].Value), cy = -PNum(m.Groups[2].Value);
+                    mac.Hits.Add(new PHit { Tool = tool, X0 = cx - t.W.Value / 2, Y0 = cy - t.H.Value / 2, X1 = cx + t.W.Value / 2, Y1 = cy + t.H.Value / 2, Macro = "単発" });
+                }
+                else err(line, "読めない行です");
+            }
+            if (exp != null) err(exp.Line, exp.Macro + " の続きが足りません");
+            if (f23 != null) err(f23.Line, "F23 の続きが足りません");
+            if (mac != null) err(mac.Line, "マクロ " + mac.No + " を F110 で閉じてください");
+            foreach (var q in r.MacroList) if (!r.Places.Any(p => p.No == q.No)) err(q.Line, "マクロ " + q.No + " を配置する F23 がありません");
+            return r;
+        }
+
+        /// <summary>コードの文（GenCode の行を改行でつないだもの）。</summary>
+        public string CodeText(string version) { return string.Join("\n", GenCode(version).Select(l => l.Text)) + "\n"; }
+
+        /// <summary>読んだコードを割付にする。誤りがあればその一覧を返し、何も変えない。変えたら null、変わらなければ空の一覧。</summary>
+        public List<CodeError> ApplyCode(string text)
+        {
+            var plan = PlanCode(text);
+            if (plan.Errs != null) return plan.Errs;
+            return CommitCode(plan) ? null : new List<CodeError>();
+        }
+
+        /// <summary>コードを読んで決めた、変える所。Lay が null のものは、コードから消したワーク（割付を消す）。</summary>
+        public class CodePlan
+        {
+            public List<CodeError> Errs;
+            public List<Tuple<int, Layout>> Plans = new List<Tuple<int, Layout>>();
+            public bool ProgramChanged; public int? Program;
+        }
+
+        /// <summary>コードを読んで、変える所を決める（まだ変えない）。</summary>
+        public CodePlan PlanCode(string text)
+        {
+            var r = ParseCode(text);
+            var groups = new Dictionary<int, List<PPlace>>();  // ワーク → そのワークの F23（書いた順）
+            foreach (var p in r.Places)
+            {
+                List<PPlace> g;
+                if (!groups.TryGetValue(p.K, out g)) { groups[p.K] = new List<PPlace> { p }; continue; }
+                if (!NearC(g[0].Px, p.Px) || !NearC(g[0].Py, p.Py) || g[0].Nx != p.Nx || g[0].Ny != p.Ny)
+                    r.Errs.Add(new CodeError { Line = p.Line, Msg = "S" + (p.K + 1) + " の F23 は、ピッチと列数をそろえてください" });
+                g.Add(p);
+            }
+            if (r.Errs.Count > 0) return new CodePlan { Errs = r.Errs.OrderBy(e => e.Line).ToList() };
+            Func<Hit, Hit, bool> sameHit = (a, b) => MacroOf(a) == MacroOf(b) && a.Tool == b.Tool && NearC(a.X0, b.X0) && NearC(a.Y0, b.Y0)
+                && NearC(a.X1, b.X1) && NearC(a.Y1, b.Y1) && (a.Tool == null || MacroOf(a) != "F13" || NearC(a.Mj ?? 0, b.Mj ?? 0));
+            var plans = new List<Tuple<int, Layout>>();
+            for (int k = 0; k < Info.Outers.Count; k++)
+            {
+                var old = LayoutOf(k);
+                List<PPlace> g;
+                if (!groups.TryGetValue(k, out g))
+                {
+                    if (old != null && old.Hits.Count > 0) plans.Add(Tuple.Create(k, (Layout)null));  // コードから消したワークは、割付を消す
+                    continue;
+                }
+                var o = WorkOrigin(k);
+                var oldHits = old != null ? HitsOf(old) : new List<Hit>();
+                var hits = new List<Hit>();
+                foreach (var p in g)
+                    foreach (var q in r.Macros[p.No].Hits)
+                    {
+                        var h = new Hit { Tool = q.Tool, X0 = Round(q.X0 + o.X), Y0 = Round(q.Y0 + o.Y), X1 = Round(q.X1 + o.X), Y1 = Round(q.Y1 + o.Y), Macro = q.Macro };
+                        if (q.Macro == "F13") h.Mj = q.Mj;
+                        var was = oldHits.Find(x => sameHit(x, h));
+                        if (was != null && was.Kind != null) h.Kind = was.Kind;  // 切り欠きの印は、同じ所を抜くものに残す
+                        hits.Add(h);
+                    }
+                bool same = old != null && oldHits.Count == hits.Count && oldHits.Select((x, i) => sameHit(x, hits[i])).All(b => b);
+                var pl = g[0];
+                // ピッチ: 自動のまま書き換えていなければ自動、自動の値と同じでも自動にする
+                var fo = old != null ? F23Of(old) : null;
+                double bw = Round(hits.Max(h => h.X1) - hits.Min(h => h.X0) + 10), bh = Round(hits.Max(h => h.Y1) - hits.Min(h => h.Y0) + 10);
+                Func<double, double?, double?, double, double?> pitch = (v, oldSet, shown, auto) =>
+                    (oldSet == null && fo != null && NearC(v, shown.Value)) || NearC(v, auto) ? (double?)null : Round(v);
+                var fr = Info.Outers[k];
+                var lay = new Layout
+                {
+                    Work = old != null ? old.Work : WorkKey(k),
+                    Src = old != null ? old.Src : HoleSrc(k),
+                    Hits = same ? old.Hits : hits,
+                    Warn = same ? old.Warn : new List<string>(),
+                    Org = same ? old.Org : new Org { X = fr.Origin.X, Y = fr.Origin.Y },
+                    Manual = (same ? old.Manual == true : true) ? true : (bool?)null,
+                    Nx = pl.Nx > 1 ? pl.Nx : (int?)null,
+                    Ny = pl.Ny > 1 ? pl.Ny : (int?)null,
+                    Px = pitch(pl.Px, old?.Px, fo?.Px, bw),
+                    Py = pitch(pl.Py, old?.Py, fo?.Py, bh),
+                };
+                if (old == null || Model.Serialize(new Doc { Layouts = new List<Layout> { lay } }) != Model.Serialize(new Doc { Layouts = new List<Layout> { old } }))
+                    plans.Add(Tuple.Create(k, lay));
+            }
+            return new CodePlan { Plans = plans, ProgramChanged = r.HasProgram && r.Program != Doc.Program, Program = r.Program };
+        }
+
+        /// <summary>PlanCode で決めた所を変える。変えたら true。</summary>
+        public bool CommitCode(CodePlan plan)
+        {
+            var plans = plan.Plans;
+            if (plans.Count == 0 && !plan.ProgramChanged) return false;
+            Snapshot();
+            var before = plans.Select(q => WorkOrigin(q.Item1)).ToList();
+            foreach (var q in plans)
+            {
+                int i = Doc.Layouts.FindIndex(x => Owner(x.Work) == q.Item1);
+                if (q.Item2 == null) Doc.Layouts.RemoveAt(i);
+                else if (i >= 0) Doc.Layouts[i] = q.Item2;
+                else Doc.Layouts.Add(q.Item2);
+            }
+            for (int i = 0; i < plans.Count; i++) KeepSheetDims(plans[i].Item1, before[i]);
+            if (plan.ProgramChanged) Doc.Program = plan.Program;
+            LayoutHit = null;
+            Changed();
+            return true;
+        }
+
         // ---- コード: 機械に手で打ち込むデータとコメントだけを並べる ----
         public List<CodeLine> GenCode(string version)
         {

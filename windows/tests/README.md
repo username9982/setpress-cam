@@ -22,4 +22,14 @@
 3. Web 版（`python -m http.server 8765 --bind 127.0.0.1` で開いたページ）の開発者ツールで、同じ図面を `loadDoc` で読み、ワークごとに自動割付して `genCode` の結果を `cs_out.txt` と比べる。
    `cs_out.txt.json` の図面も Web 版で開き、割付（`hits`）と警告が同じで、図面を書き出し直しても同じ JSON になることを確かめる。
 
+4. コードの読み取り（「編集」→「反映」）を変えたときは、書き換えたコードを `windows/build/edits.json`（`[{"name": 図面の名前, "code": 書き換えたコード}]`）に並べ、Windows 版で反映した結果を書き出す
+
+   ```
+   windows/build/debug/SetPressCam.exe --applycode windows/build/cases.json windows/build/edits.json windows/build/cs_apply.txt
+   ```
+
+   書き換えごとに `## 番号 図面` のあと、反映したら `APPLIED` と作り直したコードと図面の JSON、変わらなければ `SAME`、誤りがあれば「行: 内容」が並ぶ。
+   Web 版でも同じ図面を `loadDoc` で読み、ワークごとに `autoLayout` してから `applyCode` を呼び、同じ形の文を作って比べる（図面の JSON は、Web 版が `tool: null` を書くなどキーの並びと null の扱いが違うので、null のキーを除きキーを並べ替えてから比べる）。
+
 v0.17.11 では、10 個の図面すべてでコード 449 行が一致した（F23 のピッチ・列数を書き換えた図面でも一致した）。
+v0.17.12 では、F3・F13・単発・T・F23・プログラム番号を書き換えたもの、誤りのあるもの、ワークを消したものなど 116 通りの書き換えで、反映の結果（作り直したコード・割付・寸法・誤りの一覧）がすべて一致した。

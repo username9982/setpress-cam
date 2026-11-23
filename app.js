@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.17.11';
+const APP_VERSION = '0.17.12';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1553,7 +1553,12 @@ function keepSheetDims(k, before) {
     if (d) d.value = round(d.value + (axis === 'x' ? now.x - before.x : before.y - now.y));
   }
 }
-$('btn-autolayout').addEventListener('click', autoLayout);
+$('btn-autolayout').addEventListener('click', async () => {
+  // コードで手直しした割付は、確かめてから割り付け直す
+  const lay = layoutWork == null ? null : layoutOf(layoutWork);
+  if (lay && lay.manual && !(await confirmBox(`S${layoutWork + 1} の割付はコードで手直ししてあります。自動割付をやり直すと、手直しした所は消えます。続けますか？`, '割り付け直す'))) return;
+  autoLayout();
+});
 $('btn-clearlayout').addEventListener('click', clearLayout);
 // ミクロジョイント: 外形の角を少しだけつなげたままにする（mm）。0 ならつなげない（角 R 0）。
 // F13 は角 R のぶん各辺の両端を開けて抜くので、角 R = 金型寸法 + ミクロジョイント を入れる
@@ -1794,6 +1799,240 @@ function setF23(work, field, text) {
   changed();
 }
 
+// ---- コードを読む（手で書き換えたコードを割付に戻す） ----
+// 書き方は genCode と同じ: T → F100〜F109 … F110（中に F3・F13・単発）→ F23。「;」から後ろはコメント。
+// どのワークのマクロかは、F23 のワーク原点（板の原点から）で決める。座標は、いまのワーク原点から測る。
+// 読めない所があれば、行ごとの誤りを返して何も変えない。
+const CODE_EPS = 0.0015;  // コードの数は 0.001 mm に丸めてあるので、そのぶんは同じとみなす
+const nearC = (a, b) => Math.abs(a - b) < CODE_EPS;
+function parseCode(text) {
+  const errs = [];
+  const err = (line, msg) => errs.push({ line, msg });
+  const NUM = '(-?\\d+(?:\\.\\d+)?|-?\\.\\d+)';
+  const reXY = new RegExp(`^X${NUM}Y${NUM}$`);
+  const reR = new RegExp(`^R${NUM}$`);
+  let program;           // O の行がなければ undefined（変えない）
+  let tool = null;       // いまの T（0 から）
+  let mac = null;        // 書いている途中のマクロ {no, hits, line}
+  const macros = new Map();
+  let exp = null;        // F3・F13 の続き {macro, line, vals, tool, mac}
+  let f23 = null;        // F23 の続き {line, vals}
+  const places = [];     // F23 {no, k, px, py, nx, ny, line}
+  const rectTool = (t, line) => {
+    if (t == null) { err(line, 'T で金型を選んでから書いてください'); return null; }
+    const q = doc.tools[t];
+    if (!q || q.shape !== 'rect' || !q.w || !q.h) { err(line, `T${t + 1} は長方形の金型ではありません`); return null; }
+    return q;
+  };
+  // F3・F13 を書き終えたら、ワーク原点を (0, 0) とした座標（Y は上へ正）の長方形にする
+  const finishHit = (e) => {
+    const [st, sz, tl] = e.vals;
+    if (!(sz[0] > 0 && sz[1] > 0)) { err(e.line, `${e.macro === 'F13' ? '外形' : '寸法'}は 0 より大きくしてください`); return; }
+    let t = null;
+    if (tl) {
+      t = rectTool(e.tool, e.line);
+      if (!t) return;
+      if (!nearC(t.w, tl[0]) || !nearC(t.h, tl[1])) {
+        err(e.line, `金型 X${fmt(tl[0])} Y${fmt(tl[1])} が T${e.tool + 1}（${toolText(t)}）と合いません`);
+        return;
+      }
+    }
+    const h = { tool: t ? e.tool : null, x0: st[0], y0: -st[1] - sz[1], x1: st[0] + sz[0], y1: -st[1] };
+    if (e.macro === 'F13') {
+      h.macro = 'F13';
+      const r = e.vals[3];
+      if (nearC(r, 0) || !t) h.mj = 0;
+      else {
+        const base = Math.max(t.w, t.h);
+        if (r <= base + 1e-9) { err(e.line, `角 R は 0 か、金型の長いほうの寸法 ${fmt(base)} より大きくしてください`); return; }
+        h.mj = round(r - base);
+      }
+      // すぐ前の単発が、この F13 の前に抜く単発（ミクロジョイントの余り）と同じなら、F13 から作り直すので外す
+      const derived = f13Singles(h);
+      if (derived.length && e.mac) {
+        const tail = e.mac.hits.slice(-derived.length);
+        const same = tail.length === derived.length && tail.every((q, i) => q.macro === '単発' && q.tool === h.tool
+          && nearC((q.x0 + q.x1) / 2, (derived[i].x0 + derived[i].x1) / 2) && nearC((q.y0 + q.y1) / 2, (derived[i].y0 + derived[i].y1) / 2));
+        if (same) e.mac.hits.splice(-derived.length);
+      }
+    }
+    if (e.mac) e.mac.hits.push(h);
+  };
+  const finishF23 = (f) => {
+    const [no, org, pitch, cnt] = f.vals;
+    if (!macros.has(no)) { err(f.line, `マクロ ${no}（F${no}）がありません`); return; }
+    if (places.some((p) => p.no === no)) { err(f.line, `マクロ ${no} を 2 回配置しています`); return; }
+    const k = info.outers.findIndex((fr, i) => nearC(sheetPos(i, 'x'), org[0]) && nearC(sheetPos(i, 'y'), org[1]));
+    if (k < 0) { err(f.line, `板の原点から X${fmt(org[0])} Y${fmt(org[1])} にワーク原点がありません（ワークは図面で動かしてください）`); return; }
+    if (!(pitch[0] > 0 && pitch[1] > 0)) { err(f.line, 'ピッチは 0 より大きくしてください'); return; }
+    if (cnt.some((n) => n < 1 || n > F23_MAX)) { err(f.line, `列数は 1〜${F23_MAX} にしてください`); return; }
+    places.push({ no, k, px: pitch[0], py: pitch[1], nx: cnt[0], ny: cnt[1], line: f.line });
+  };
+  String(text).split(/\r?\n/).forEach((raw, idx) => {
+    const line = idx + 1;
+    const body = raw.normalize('NFKC').split(';')[0].toUpperCase().replace(/\s+/g, ' ').trim();  // 全角の「；」もコメント
+    if (!body) return;
+    const c = body.replace(/ /g, '');
+    let m;
+    if (exp) {
+      const step = exp.vals.length;
+      if (exp.macro === 'F13' && step === 3) {
+        if (!(m = c.match(reR))) { err(line, '角 R（R0 など）を書いてください'); exp = null; return; }
+        exp.vals.push(Number(m[1]));
+      } else if (step === 2 && c === '??') {
+        exp.vals.push(null);  // 入る金型がない
+      } else {
+        if (!(m = c.match(reXY))) {
+          err(line, `${['開始点', exp.macro === 'F13' ? '外形' : '寸法', '金型'][step]}の X Y を書いてください（例: X50 Y20）`);
+          exp = null;
+          return;
+        }
+        exp.vals.push([Number(m[1]), Number(m[2])]);
+      }
+      if (exp.vals.length === (exp.macro === 'F13' ? 4 : 3)) { finishHit(exp); exp = null; }
+      return;
+    }
+    if (f23) {
+      const step = f23.vals.length;
+      if (step === 0) {
+        if (!/^\d+$/.test(c)) { err(line, 'マクロ番号を書いてください（例: 100）'); f23 = null; return; }
+        f23.vals.push(Number(c));
+      } else if (step < 3) {
+        if (!(m = c.match(reXY))) { err(line, `${step === 1 ? 'ワーク原点' : 'ピッチ'}の X Y を書いてください`); f23 = null; return; }
+        f23.vals.push([Number(m[1]), Number(m[2])]);
+      } else {
+        if (!(m = body.match(/^(\d+) (\d+)$/))) { err(line, '列数を 2 つの整数で書いてください（例: 2 3）'); f23 = null; return; }
+        f23.vals.push([Number(m[1]), Number(m[2])]);
+      }
+      if (f23.vals.length === 4) { finishF23(f23); f23 = null; }
+      return;
+    }
+    if ((m = c.match(/^O(\d+|-+)$/))) {
+      if (m[1].startsWith('-')) program = null;
+      else {
+        const n = Number(m[1]);
+        if (n < PROGRAM_MIN || n > PROGRAM_MAX) err(line, `プログラム番号は ${PROGRAM_MIN}〜${PROGRAM_MAX} にしてください`);
+        else program = n;
+      }
+    } else if ((m = c.match(/^T(\d+)$/))) {
+      const n = Number(m[1]);
+      if (mac) err(line, 'マクロ（F100〜F110）の中には T を書けません');
+      else if (n < 1 || n > doc.tools.length || doc.tools[n - 1].shape === 'none') err(line, `T${n} の金型がありません（「金型」で決めてください）`);
+      else tool = n - 1;
+    } else if ((m = c.match(/^F(\d+)$/))) {
+      const f = Number(m[1]);
+      if (f === 3 || f === 13) {
+        if (!mac) err(line, `F${f} は F100〜F110 の中に書いてください`);
+        exp = { macro: f === 13 ? 'F13' : 'F3', line, vals: [], tool, mac };
+      } else if (f >= 100 && f <= 109) {
+        if (mac) err(line, `F110 でマクロ ${mac.no} を閉じてから書いてください`);
+        else if (macros.has(f)) err(line, `マクロ ${f} が 2 回あります`);
+        else { mac = { no: f, hits: [], line }; macros.set(f, mac); }
+      } else if (f === 110) {
+        if (!mac) err(line, 'F110 の前に F100〜F109 がありません');
+        mac = null;
+      } else if (f === 23) {
+        if (mac) err(line, 'F23 は F110 のあとに書いてください');
+        f23 = { line, vals: [] };
+      } else err(line, `F${f} はここでは使えません（F3・F13・F23・F100〜F110）`);
+    } else if ((m = c.match(reXY))) {
+      // マクロの中の X Y だけの行は単発（金型の中心）
+      if (!mac) { err(line, '単発（X Y）は F100〜F110 の中に書いてください'); return; }
+      const t = rectTool(tool, line);
+      if (!t) return;
+      const cx = Number(m[1]), cy = -Number(m[2]);
+      mac.hits.push({ tool, x0: cx - t.w / 2, y0: cy - t.h / 2, x1: cx + t.w / 2, y1: cy + t.h / 2, macro: '単発' });
+    } else err(line, '読めない行です');
+  });
+  if (exp) err(exp.line, `${exp.macro} の続きが足りません`);
+  if (f23) err(f23.line, 'F23 の続きが足りません');
+  if (mac) err(mac.line, `マクロ ${mac.no} を F110 で閉じてください`);
+  for (const [no, q] of macros) if (!places.some((p) => p.no === no)) err(q.line, `マクロ ${no} を配置する F23 がありません`);
+  return { errs, program, places, macros };
+}
+
+// 読んだコードを割付にする。誤りがあれば [{line, msg}] を返し、何も変えない。変えたら null、変わらなければ []
+function applyCode(text) {
+  const plan = planCode(text);
+  if (plan.errs) return plan.errs;
+  return commitCode(plan) ? null : [];
+}
+// コードを読んで、変える所を決める（まだ変えない）。誤りがあれば {errs}、なければ {plans: [{k, lay}], program}。
+// lay が null のものは、コードから消したワーク（割付を消す）
+function planCode(text) {
+  const r = parseCode(text);
+  const groups = new Map();  // ワーク → そのワークの F23（書いた順）
+  for (const p of r.places) {
+    const g = groups.get(p.k);
+    if (!g) { groups.set(p.k, [p]); continue; }
+    if (!nearC(g[0].px, p.px) || !nearC(g[0].py, p.py) || g[0].nx !== p.nx || g[0].ny !== p.ny)
+      r.errs.push({ line: p.line, msg: `S${p.k + 1} の F23 は、ピッチと列数をそろえてください` });
+    g.push(p);
+  }
+  if (r.errs.length) return { errs: r.errs.sort((a, b) => a.line - b.line) };
+  const sameHit = (a, b) => macroOf(a) === macroOf(b) && a.tool === b.tool && nearC(a.x0, b.x0) && nearC(a.y0, b.y0)
+    && nearC(a.x1, b.x1) && nearC(a.y1, b.y1) && (a.tool == null || macroOf(a) !== 'F13' || nearC(a.mj || 0, b.mj || 0));
+  const plans = [];
+  info.outers.forEach((fr, k) => {
+    const old = layoutOf(k);
+    const g = groups.get(k);
+    if (!g) {
+      if (old && old.hits.length) plans.push({ k, lay: null });  // コードから消したワークは、割付を消す
+      return;
+    }
+    const o = workOrigin(k);
+    const oldHits = old ? hitsOf(old) : [];
+    const hits = [];
+    for (const p of g) {
+      for (const q of r.macros.get(p.no).hits) {
+        const h = { tool: q.tool, x0: round(q.x0 + o.x), y0: round(q.y0 + o.y), x1: round(q.x1 + o.x), y1: round(q.y1 + o.y) };
+        if (q.macro) h.macro = q.macro;
+        if (q.macro === 'F13') h.mj = q.mj;
+        const was = oldHits.find((x) => sameHit(x, h));
+        if (was && was.kind) h.kind = was.kind;  // 切り欠きの印は、同じ所を抜くものに残す
+        hits.push(h);
+      }
+    }
+    const same = old && oldHits.length === hits.length && oldHits.every((x, i) => sameHit(x, hits[i]));
+    const p = g[0];
+    // ピッチ: 自動のまま書き換えていなければ自動、自動の値と同じでも自動にする
+    const fo = old ? f23Of(old) : null;
+    const bw = round(Math.max(...hits.map((h) => h.x1)) - Math.min(...hits.map((h) => h.x0)) + 10);
+    const bh = round(Math.max(...hits.map((h) => h.y1)) - Math.min(...hits.map((h) => h.y0)) + 10);
+    const pitch = (v, oldSet, shown, auto) => ((oldSet == null && fo && nearC(v, shown)) || nearC(v, auto) ? null : round(v));
+    const px = pitch(p.px, old && old.px, fo && fo.px, bw), py = pitch(p.py, old && old.py, fo && fo.py, bh);
+    const lay = {
+      work: old ? old.work : workKey(k),
+      src: old ? old.src : holeSrc(k),
+      hits: same ? old.hits : hits,
+      warn: same ? old.warn : [],
+      org: same ? old.org : { x: fr.origin.x, y: fr.origin.y },
+      ...((same ? old.manual : true) ? { manual: true } : {}),
+      ...(p.nx > 1 ? { nx: p.nx } : {}), ...(p.ny > 1 ? { ny: p.ny } : {}),
+      ...(px != null ? { px } : {}), ...(py != null ? { py } : {}),
+    };
+    if (!old || JSON.stringify(lay) !== JSON.stringify(old)) plans.push({ k, lay });
+  });
+  return { plans, program: r.program !== undefined && r.program !== doc.program ? r.program : undefined };
+}
+// planCode で決めた所を変える。変えたら true
+function commitCode({ plans, program }) {
+  if (!plans.length && program === undefined) return false;
+  snapshot();
+  const before = plans.map((q) => workOrigin(q.k));
+  for (const q of plans) {
+    const i = doc.layouts.findIndex((x) => info.owner.get(x.work) === q.k);
+    if (q.lay == null) doc.layouts.splice(i, 1);
+    else if (i >= 0) doc.layouts[i] = q.lay;
+    else doc.layouts.push(q.lay);
+  }
+  plans.forEach((q, i) => keepSheetDims(q.k, before[i]));
+  if (program !== undefined) doc.program = program;
+  layoutHit = null;
+  changed();
+  return true;
+}
+
 function genCode() {
   const lines = [];  // {text, key?, comment?, edit?: F23 の書き換えられる行 {work, fields, vals, prefix, note}}
   const add = (text, key, comment = false, edit = null) => lines.push({ text, key, comment, edit });
@@ -1882,9 +2121,16 @@ function genCode() {
 
 let lastCodeSel = '';
 let holdCode = false;
+let codeEditBase = null;  // 文字で書き換えはじめたとき（反映したとき）のコード。null なら書き換えていない
 function renderCode(force = false) {
   const box = $('code');
   if (!box || holdCode) return;  // 更新の途中で古い index.html と組み合わさったとき
+  if (codeEditBase != null) {
+    // 文字で書き換えている途中: まだ書き換えていなければ、図面の変更に合わせて作り直す
+    const ta = $('code-text');
+    if (ta.value === codeEditBase) { codeEditBase = codeText(); ta.value = codeEditBase; }
+    return;
+  }
   // F23 の欄を書き換えている途中は作り直さない（書いている文字が消えるので）。確定したら作り直し、同じ欄に戻す
   const act = document.activeElement;
   const editing = act && act.classList && act.classList.contains('code-in') && box.contains(act) ? act.dataset.field : null;
@@ -1959,8 +2205,55 @@ $('code')?.addEventListener('click', (e) => {
   draw();
 });
 
+// ---- コードを文字で書き換える（「編集」→「反映」） ----
+const codeText = () => genCode().map((l) => l.text).join('\n') + '\n';
+function setCodeEditing(on) {
+  codeEditBase = on ? codeText() : null;
+  if ($('code-edit')) $('code-edit').hidden = !on;
+  $('code').hidden = on;
+  $('btn-code-edit').hidden = on;
+  if (on) { $('code-text').value = codeEditBase; showCodeErrors([]); $('code-text').focus(); }
+  else renderCode();
+}
+function showCodeErrors(errs) {
+  const ul = $('code-err');
+  ul.textContent = '';
+  for (const e of errs.slice(0, 20)) {
+    const li = document.createElement('li');
+    li.textContent = `${e.line} 行目: ${e.msg}`;
+    li.addEventListener('click', () => {
+      // その行を選ぶ
+      const ta = $('code-text');
+      const rows = ta.value.split('\n');
+      const start = rows.slice(0, e.line - 1).reduce((n, s) => n + s.length + 1, 0);
+      ta.focus();
+      ta.setSelectionRange(start, start + (rows[e.line - 1] || '').length);
+    });
+    ul.append(li);
+  }
+  if (errs.length > 20) { const li = document.createElement('li'); li.textContent = `ほかに ${errs.length - 20} 件`; ul.append(li); }
+}
+async function applyCodeText() {
+  const plan = planCode($('code-text').value);
+  if (plan.errs) { showCodeErrors(plan.errs); flash(`コードに ${plan.errs.length} 件の誤りがあります`); return; }
+  // ワークの割付をまるごと消すときは確かめる（全部消してしまったときなど）
+  const gone = plan.plans.filter((q) => q.lay == null).map((q) => `S${q.k + 1}`);
+  if (gone.length && !(await confirmBox(`コードに ${gone.join('・')} の F23 がないので、${gone.join('・')} の割付を消します。続けますか？`, '消す'))) return;
+  const done = commitCode(plan);
+  showCodeErrors([]);
+  codeEditBase = codeText();
+  $('code-text').value = codeEditBase;  // 読んだ結果を、ふだんの書き方に直して見せる
+  flash(done ? 'コードを反映しました' : '変わった所はありません');
+}
+$('btn-code-edit')?.addEventListener('click', () => setCodeEditing(true));
+$('btn-code-cancel')?.addEventListener('click', () => setCodeEditing(false));
+$('btn-code-apply')?.addEventListener('click', applyCodeText);
+$('code-text')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); applyCodeText(); }
+});
+
 $('btn-copy')?.addEventListener('click', async () => {
-  const text = genCode().map((l) => l.text).join('\n') + '\n';
+  const text = codeEditBase != null ? $('code-text').value : genCode().map((l) => l.text).join('\n') + '\n';
   try {
     await navigator.clipboard.writeText(text);
     flash('コピーしました');
@@ -2083,6 +2376,7 @@ function loadDoc(d) {
       })).filter((h) => [h.x0, h.y0, h.x1, h.y1].every(Number.isFinite)),
       warn: (Array.isArray(q.warn) ? q.warn : []).map(String),
       org: q.org && Number.isFinite(Number(q.org.x)) && Number.isFinite(Number(q.org.y)) ? { x: Number(q.org.x), y: Number(q.org.y) } : null,
+      ...(q.manual === true ? { manual: true } : {}),
       ...f23Fields(q),
     })),
     nextId: Math.max(Number(d.nextId) || 1, maxId + 1),

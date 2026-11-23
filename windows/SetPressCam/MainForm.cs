@@ -239,7 +239,14 @@ namespace SetPressCam
             workRow.Controls.Add(lpWork);
             add(workRow);
             btnAuto = new FlatButton("自動割付", Ui.PRIMARY) { Width = Ui.S(w) };
-            btnAuto.Pressed += () => { ed.AutoLayout(); canvas.Focus(); };
+            btnAuto.Pressed += () =>
+            {
+                // コードで手直しした割付は、確かめてから割り付け直す
+                var lay = ed.LayoutWork == null ? null : ed.LayoutOf(ed.LayoutWork.Value);
+                if (lay != null && lay.Manual == true && !AskDialog.Confirm(this, "S" + (ed.LayoutWork + 1) + " の割付はコードで手直ししてあります。自動割付をやり直すと、手直しした所は消えます。続けますか？", "割り付け直す")) return;
+                ed.AutoLayout();
+                canvas.Focus();
+            };
             btnClear = new FlatButton("割付を消す") { Width = Ui.S(w) };
             btnClear.Pressed += () => { ed.ClearLayout(); canvas.Focus(); };
             add(btnAuto);
@@ -319,9 +326,124 @@ namespace SetPressCam
             };
             var copy = new FlatButton("コピー", null, 36, 0, 14);
             copy.Pressed += CopyCode;
+            btnCodeEdit = new FlatButton("編集", null, 36, 0, 14);
+            btnCodeEdit.Pressed += () => SetCodeEditing(true);
+            var heads = new Panel { BackColor = Ui.HEAD, Height = copy.Height };
+            heads.Controls.Add(btnCodeEdit);
+            heads.Controls.Add(copy);
+            btnCodeEdit.Location = new System.Drawing.Point(0, 0);
+            copy.Location = new System.Drawing.Point(btnCodeEdit.Right + Ui.S(8), 0);
+            heads.Width = copy.Right;
             panel.Controls.Add(code);
-            panel.Controls.Add(new PaneHead("コード", "機械に入力するデータ", copy));
+            panel.Controls.Add(BuildCodeEdit());
+            panel.Controls.Add(new PaneHead("コード", "機械に入力するデータ", heads));
             return panel;
+        }
+
+        // ---- コードを文字で書き換える（「編集」→「反映」） ----
+        FlatButton btnCodeEdit;
+        Panel codeEdit;
+        TextBox codeText;
+        ListBox codeErr;
+        List<Editor.CodeError> codeErrors = new List<Editor.CodeError>();
+        string codeEditBase;  // 書き換えはじめたとき（反映したとき）のコード。null なら書き換えていない
+
+        Control BuildCodeEdit()
+        {
+            codeEdit = new Panel { Dock = DockStyle.Fill, Visible = false, BackColor = Ui.PANEL };
+            codeText = new TextBox
+            {
+                Dock = DockStyle.Fill, Multiline = true, AcceptsReturn = true, WordWrap = false, ScrollBars = ScrollBars.Both,
+                BorderStyle = BorderStyle.None, Font = Ui.Mono, BackColor = Ui.Hex("#fffef6"),
+            };
+            codeText.KeyDown += (s, e) =>
+            {
+                if (e.Control && e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; ApplyCodeText(); }
+                else if (e.Control && e.KeyCode == Keys.A) { e.SuppressKeyPress = true; codeText.SelectAll(); }  // 複数行の TextBox は Ctrl+A で全部を選ばない
+            };
+            codeErr = new ListBox
+            {
+                Dock = DockStyle.Bottom, Height = Ui.S(96), Visible = false, BorderStyle = BorderStyle.None, IntegralHeight = false,
+                Font = Ui.F(13), ForeColor = Ui.Hex("#b3261e"), BackColor = Ui.PANEL,
+            };
+            codeErr.Click += (s, e) =>
+            {
+                // その行を選ぶ
+                int i = codeErr.SelectedIndex;
+                if (i < 0 || i >= codeErrors.Count) return;
+                int ln = codeErrors[i].Line - 1;
+                if (ln < 0 || ln >= codeText.Lines.Length) return;
+                codeText.Focus();
+                codeText.Select(codeText.GetFirstCharIndexFromLine(ln), codeText.Lines[ln].Length);
+                codeText.ScrollToCaret();
+            };
+            var bar = new Panel { Dock = DockStyle.Bottom, Height = Ui.S(49), BackColor = Ui.Hex("#eef1f4") };
+            bar.Paint += (s, e) => { using (var p = new Pen(Ui.LINE)) e.Graphics.DrawLine(p, 0, 0, bar.Width, 0); };
+            var note = Ui.Label("F3・F13・単発・T・F23 を書き換えて「反映」", Ui.F(12), Ui.NOTE);
+            var cancel = new FlatButton("やめる", null, 36, 0, 14);
+            cancel.Pressed += () => SetCodeEditing(false);
+            var apply = new FlatButton("反映", Ui.PRIMARY, 36, 0, 14);
+            apply.Pressed += ApplyCodeText;
+            bar.Controls.Add(note);
+            bar.Controls.Add(cancel);
+            bar.Controls.Add(apply);
+            bar.Layout += (s, e) =>
+            {
+                apply.Location = new System.Drawing.Point(bar.Width - apply.Width - Ui.S(8), (bar.Height - apply.Height) / 2);
+                cancel.Location = new System.Drawing.Point(apply.Left - cancel.Width - Ui.S(8), apply.Top);
+                note.Location = new System.Drawing.Point(Ui.S(8), (bar.Height - note.Height) / 2);
+                note.Visible = note.Right < cancel.Left - Ui.S(4);
+            };
+            codeEdit.Controls.Add(codeText);
+            codeEdit.Controls.Add(codeErr);
+            codeEdit.Controls.Add(bar);
+            return codeEdit;
+        }
+
+        static string Crlf(string s) { return s.Replace("\r\n", "\n").Replace("\n", "\r\n"); }
+
+        void SetCodeEditing(bool on)
+        {
+            codeEditBase = on ? Crlf(ed.CodeText(Program.VERSION)) : null;
+            codeEdit.Visible = on;
+            code.Visible = !on;
+            btnCodeEdit.Enabled = !on;
+            if (on)
+            {
+                codeText.Text = codeEditBase;
+                ShowCodeErrors(new List<Editor.CodeError>());
+                codeText.Focus();
+                codeText.Select(0, 0);
+            }
+            else canvas.Focus();
+        }
+
+        void ShowCodeErrors(List<Editor.CodeError> errs)
+        {
+            codeErrors = errs.Take(20).ToList();
+            codeErr.Items.Clear();
+            foreach (var e in codeErrors) codeErr.Items.Add(e.Line + " 行目: " + e.Msg);
+            if (errs.Count > 20) codeErr.Items.Add("ほかに " + (errs.Count - 20) + " 件");
+            codeErr.Visible = errs.Count > 0;
+        }
+
+        void ApplyCodeText()
+        {
+            var plan = ed.PlanCode(codeText.Text);
+            if (plan.Errs != null)
+            {
+                ShowCodeErrors(plan.Errs);
+                Flash("コードに " + plan.Errs.Count + " 件の誤りがあります");
+                return;
+            }
+            // ワークの割付をまるごと消すときは確かめる（全部消してしまったときなど）
+            var gone = plan.Plans.Where(q => q.Item2 == null).Select(q => "S" + (q.Item1 + 1)).ToList();
+            if (gone.Count > 0 && !AskDialog.Confirm(this, "コードに " + string.Join("・", gone) + " の F23 がないので、" + string.Join("・", gone) + " の割付を消します。続けますか？", "消す")) return;
+            bool done = ed.CommitCode(plan);
+            ShowCodeErrors(new List<Editor.CodeError>());
+            codeEditBase = Crlf(ed.CodeText(Program.VERSION));
+            codeText.Text = codeEditBase;  // 読んだ結果を、ふだんの書き方に直して見せる
+            Flash(done ? "コードを反映しました" : "変わった所はありません");
         }
 
         HashSet<string> SelKeys()
@@ -334,6 +456,12 @@ namespace SetPressCam
         void RenderCode()
         {
             var lines = ed.GenCode(Program.VERSION);
+            // 文字で書き換えている途中: まだ書き換えていなければ、図面の変更に合わせて作り直す
+            if (codeEditBase != null && codeText.Text == codeEditBase)
+            {
+                codeEditBase = Crlf(string.Join("\n", lines.Select(l => l.Text)) + "\n");
+                codeText.Text = codeEditBase;
+            }
             var keys = SelKeys();
             code.SetLines(lines, keys);
             // 選んだものが変わったときだけ、その行まで送る
@@ -345,7 +473,7 @@ namespace SetPressCam
 
         void CopyCode()
         {
-            var text = string.Join("\r\n", ed.GenCode(Program.VERSION).Select(l => l.Text)) + "\r\n";
+            var text = codeEditBase != null ? codeText.Text : string.Join("\r\n", ed.GenCode(Program.VERSION).Select(l => l.Text)) + "\r\n";
             try { Clipboard.SetText(text); Flash("コピーしました"); }
             catch (Exception) { Flash("コピーできませんでした"); }
         }

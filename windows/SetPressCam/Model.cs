@@ -87,6 +87,8 @@ namespace SetPressCam
         public List<Hit> Hits { get; set; } = new List<Hit>();
         public List<string> Warn { get; set; } = new List<string>();
         public Org Org { get; set; }
+        /// <summary>コードで手直しした割付（自動割付をやり直す前に確かめる）。手直ししていなければ null。</summary>
+        public bool? Manual { get; set; }
         // F23（多数個取り）: 列数（無ければ 1）とピッチ（無ければ 抜く形を囲む四角 + 10 mm）
         public int? Nx { get; set; }
         public int? Ny { get; set; }
@@ -323,6 +325,7 @@ namespace SetPressCam
                     Work = (int)work, Src = q["src"] == null ? "" : Str(q["src"]), Hits = hits,
                     Warn = Arr(q["warn"]).Select(Str).ToList(),
                     Org = org != null && Finite(ox) && Finite(oy) ? new Org { X = ox, Y = oy } : null,
+                    Manual = q["manual"] is JsonValue mv && mv.TryGetValue(out bool mb) && mb ? true : (bool?)null,
                     Nx = F23Count(q["nx"]), Ny = F23Count(q["ny"]), Px = F23Pitch(q["px"]), Py = F23Pitch(q["py"]),
                 });
             }
