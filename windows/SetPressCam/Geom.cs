@@ -72,9 +72,17 @@ namespace SetPressCam
         public List<int> LineIds, PointIds;
         public List<V> Poly;
         public double Area;
-        public string Role;  // outer / hole / notch
+        public string Role;  // outer / hole / notch / circle（外形にならない丸）
         public int? Parent;  // 抜く側: 重なる外形（shapes の番号）
         public int? Outer;   // 属する外形（outers の番号）
+        public CircleGeo Circle;  // 図面の丸（null は線で閉じた図形）
+    }
+
+    /// <summary>図形としての丸（中心と半径）。</summary>
+    public class CircleGeo
+    {
+        public int Id;
+        public double X, Y, R;
     }
 
     public class OuterFrame
@@ -187,6 +195,9 @@ namespace SetPressCam
                 var pts = s.PointIds.Select(id => PointById(doc, id)).ToList();
                 double minX = pts.Min(p => p.X), maxY = pts.Max(p => p.Y);
                 outerOf[i] = outs.Count;
+                // 丸の外形: 原点は丸を囲む四角の左上、基準は X・Y とも丸の中心
+                var c = s.Circle;
+                if (c != null) { outs.Add(new OuterFrame { Shape = i, Origin = new V(Js.R3(c.X - c.R), Js.R3(c.Y + c.R)), RefX = s.PointIds[0], RefY = s.PointIds[0] }); continue; }
                 outs.Add(new OuterFrame
                 {
                     Shape = i,
@@ -202,6 +213,7 @@ namespace SetPressCam
                 var s = shapes[i];
                 int o;
                 s.Outer = outerOf.TryGetValue(s.Role == "outer" ? i : (s.Parent ?? -1), out o) ? o : (int?)null;
+                if (s.Role == "circle") continue;  // 外形にならない丸（丸穴）は、中心が内側にある外形に入れる（下の at）
                 foreach (var id in s.PointIds)
                 {
                     if (s.Outer == null) continue;
@@ -229,7 +241,8 @@ namespace SetPressCam
                 for (int k = 0; k < outs.Count; k++)
                 {
                     var sh = shapes[outs[k].Shape];
-                    if (Inside(sh.Poly, x, y) >= 0 && (best == null || sh.Area < shapes[outs[best.Value].Shape].Area)) best = k;
+                    bool inn = sh.Circle != null ? Dist(x - sh.Circle.X, y - sh.Circle.Y) <= sh.Circle.R + EPS : Inside(sh.Poly, x, y) >= 0;
+                    if (inn && (best == null || sh.Area < shapes[outs[best.Value].Shape].Area)) best = k;
                 }
                 return best;
             };
@@ -244,7 +257,7 @@ namespace SetPressCam
         public static Analysis Analyze(Doc doc)
         {
             var a = new Analysis { UfX = Build(doc, "x"), UfY = Build(doc, "y") };
-            a.Shapes = ClassifyShapes(ClosedShapes(doc));
+            a.Shapes = AllShapes(doc);
             List<OuterFrame> outers; Dictionary<int, int> owner; Func<double, double, int?> outerAt;
             OuterFrames(doc, a.Shapes, out outers, out owner, out outerAt);
             a.Outers = outers; a.Owner = owner; a.OuterAt = outerAt;
@@ -254,7 +267,7 @@ namespace SetPressCam
         static HashSet<int> AnchorRoots(Doc doc, UF uf, string axis)
         {
             List<OuterFrame> outers; Dictionary<int, int> owner; Func<double, double, int?> at;
-            OuterFrames(doc, ClassifyShapes(ClosedShapes(doc)), out outers, out owner, out at);
+            OuterFrames(doc, AllShapes(doc), out outers, out owner, out at);
             return new HashSet<int>(outers.Select(o => uf.Find(axis == "x" ? o.RefX : o.RefY)));
         }
 
@@ -539,7 +552,67 @@ namespace SetPressCam
             return Mids(q).Any(v => Inside(p, v.X, v.Y) > 0) || Mids(p).Any(v => Inside(q, v.X, v.Y) > 0);
         }
 
-        // 閉じた図形を、外形・穴・切り欠きに分ける
+        // 図面の丸も、閉じた図形と同じ形で並べる。ほかと重ならない丸は外形になる。
+        // Poly は 72 角形で近似したもの（塗る・ほかのワークとの重なりを見るなど）。外形・穴の分け方は丸のまま計る
+        public static List<Shape> CircleShapes(Doc doc)
+        {
+            var output = new List<Shape>();
+            foreach (var c in doc.Circles ?? new List<Circle>())
+            {
+                var p = PointById(doc, c.C);
+                double r = c.D / 2;
+                if (p == null || !(r > 0)) continue;
+                var poly = new List<V>();
+                for (int i = 0; i < 72; i++) poly.Add(new V(p.X + r * Math.Cos(i * Math.PI / 36), p.Y + r * Math.Sin(i * Math.PI / 36)));
+                output.Add(new Shape { LineIds = new List<int>(), PointIds = new List<int> { c.C }, Poly = poly, Area = Math.PI * r * r, Circle = new CircleGeo { Id = c.Id, X = p.X, Y = p.Y, R = r } });
+            }
+            return output;
+        }
+        public static List<Shape> AllShapes(Doc doc) { return ClassifyShapes(ClosedShapes(doc).Concat(CircleShapes(doc)).ToList()); }
+        static double Dist(double dx, double dy) { return Math.Sqrt(dx * dx + dy * dy); }
+        // 点 (x, y) から線分 ab までの距離
+        static double SegDist(V a, V b, double x, double y)
+        {
+            double dx = b.X - a.X, dy = b.Y - a.Y, len = dx * dx + dy * dy;
+            double t = len > 0 ? Math.Max(0, Math.Min(1, ((x - a.X) * dx + (y - a.Y) * dy) / len)) : 0;
+            return Dist(a.X + t * dx - x, a.Y + t * dy - y);
+        }
+        static double EdgeDist(List<V> poly, double x, double y)
+        {
+            double m = double.PositiveInfinity;
+            for (int i = 0; i < poly.Count; i++) m = Math.Min(m, SegDist(poly[i], poly[(i + 1) % poly.Count], x, y));
+            return m;
+        }
+        // 図形 s が、外形 b に対してどうか: none（重ならない）、inside（内側に収まる）、cross（はみ出す・辺に触れる）
+        static string Relation(Shape b, Shape s)
+        {
+            if (b.Circle == null && s.Circle == null)
+            {
+                if (!Overlaps(b.Poly, s.Poly)) return "none";
+                return s.Poly.All(v => Inside(b.Poly, v.X, v.Y) > 0) && !EdgesCross(b.Poly, s.Poly) ? "inside" : "cross";
+            }
+            if (b.Circle != null && s.Circle != null)
+            {
+                double d = Dist(s.Circle.X - b.Circle.X, s.Circle.Y - b.Circle.Y);
+                if (d >= b.Circle.R + s.Circle.R - EPS) return "none";
+                return d + s.Circle.R < b.Circle.R - EPS ? "inside" : "cross";
+            }
+            if (b.Circle != null)
+            {
+                double x = b.Circle.X, y = b.Circle.Y, r = b.Circle.R;
+                if (s.Poly.All(v => Dist(v.X - x, v.Y - y) < r - EPS)) return "inside";
+                return Inside(s.Poly, x, y) >= 0 || EdgeDist(s.Poly, x, y) < r - EPS ? "cross" : "none";
+            }
+            {
+                double x = s.Circle.X, y = s.Circle.Y, r = s.Circle.R;
+                int ins = Inside(b.Poly, x, y);
+                double ed = EdgeDist(b.Poly, x, y);
+                if (ins > 0 && ed > r + EPS) return "inside";
+                return ins >= 0 || ed < r - EPS ? "cross" : "none";
+            }
+        }
+
+        // 閉じた図形を、外形・穴・切り欠きに分ける。丸は、外形にならなければ circle（丸穴）
         public static List<Shape> ClassifyShapes(List<Shape> shapes)
         {
             var order = Enumerable.Range(0, shapes.Count).ToList();
@@ -548,12 +621,11 @@ namespace SetPressCam
             foreach (int i in order)
             {
                 var s = shapes[i];
-                int hit = bases.FindIndex(b => Overlaps(shapes[b].Poly, s.Poly));
-                if (hit < 0) { s.Role = "outer"; s.Parent = null; bases.Add(i); continue; }
-                int hb = bases[hit];
-                var bp = shapes[hb].Poly;
-                bool allInside = s.Poly.All(v => Inside(bp, v.X, v.Y) > 0) && !EdgesCross(bp, s.Poly);
-                s.Role = allInside ? "hole" : "notch";
+                int? hb = null;
+                string rel = "none";
+                foreach (int b in bases) { rel = Relation(shapes[b], s); if (rel != "none") { hb = b; break; } }
+                if (hb == null) { s.Role = "outer"; s.Parent = null; bases.Add(i); continue; }
+                s.Role = s.Circle != null ? "circle" : rel == "inside" ? "hole" : "notch";
                 s.Parent = hb;
             }
             return shapes;

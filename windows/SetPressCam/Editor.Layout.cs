@@ -25,6 +25,15 @@ namespace SetPressCam
                 for (int i = 0; i < hs.Count; i++)
                 {
                     var h = hs[i];
+                    if (h.Kind == "outline")
+                    {
+                        // 丸の外形の追い抜きは、金型が通る輪だけ。金型がないときも指で押せる幅にする
+                        var t = ToolOf(h);
+                        double m = 10 / scale, rr = (h.X1 - h.X0) / 2;
+                        double dx = x - (h.X0 + h.X1) / 2, dy = y - (h.Y0 + h.Y1) / 2, d = Math.Sqrt(dx * dx + dy * dy);
+                        if (d <= rr + m && d >= rr - Math.Max(t != null ? t.D ?? 0 : 0, m) - m) list.Add(new HitRef(lay.Work, i));
+                        continue;
+                    }
                     if (MacroOf(h) == "F13")
                     {
                         var t = ToolOf(h);
@@ -85,7 +94,10 @@ namespace SetPressCam
         public Layout LayoutOf(int k) { return Doc.Layouts.Find(q => Owner(q.Work) == k); }
         public List<Shape> HolesOf(int k) { return Shapes.Where(s => s.Role == "hole" && s.Outer == k).ToList(); }
         public List<Shape> NotchesOf(int k) { return Shapes.Where(s => s.Role == "notch" && s.Outer == k).ToList(); }
-        public List<Circle> CirclesOf(int k) { return Circles.Where(c => Owner(c.C) == k).ToList(); }
+        /// <summary>丸の外形なら、その丸。ほかは null</summary>
+        public CircleGeo OuterCircle(int k) { return Shapes[Info.Outers[k].Shape].Circle; }
+        /// <summary>ワークの丸穴（丸の外形そのものは入れない）</summary>
+        public List<Circle> CirclesOf(int k) { var oc = OuterCircle(k); return Circles.Where(c => Owner(c.C) == k && !(oc != null && c.Id == oc.Id)).ToList(); }
 
         // JSON.stringify と同じ書き方
         static string PolysJson(IEnumerable<List<V>> polys, V o)
@@ -114,18 +126,35 @@ namespace SetPressCam
             var cs = CirclesOf(k);
             string src = PolysJson(HolesOf(k).Select(s => s.Poly), o) + (notches.Count > 0 ? "|N" + PolysJson(notches.Select(s => s.Poly), o) : "")
                 + (cs.Count > 0 ? "|C[" + string.Join(",", cs.Select(c => { var p = P(c.C); return "[" + Js.Num(Round(p.X - o.X)) + "," + Js.Num(Round(o.Y - p.Y)) + "," + Js.Num(c.D) + "]"; })) + "]" : "");
+            var oc = OuterCircle(k);
+            if (oc != null) return src + "|O" + Js.Num(Round(oc.R * 2));  // 丸の外形は直径
             return src + "|" + PolyJson(Shapes[Info.Outers[k].Shape].Poly, o);
         }
 
         /// <summary>外形を囲む四角。F13 はこの四角を抜き、L 字などで四角から欠けた所は切り欠きとして先に抜く</summary>
         public R OuterRect(int k)
         {
+            var oc = OuterCircle(k);
+            if (oc != null) return new R(Round(oc.X - oc.R), Round(oc.Y - oc.R), Round(oc.X + oc.R), Round(oc.Y + oc.R));
             var poly = Shapes[Info.Outers[k].Shape].Poly;
             return new R(poly.Min(v => v.X), poly.Min(v => v.Y), poly.Max(v => v.X), poly.Max(v => v.Y));
         }
 
         static bool IsRectTool(Tool t) { return t.Shape == "rect" && (t.W ?? 0) != 0 && (t.H ?? 0) != 0; }
         static double Area(Tool t) { return t.W.Value * t.H.Value; }
+
+        /// <summary>丸の外形を抜く金型: 丸の金型のうち、いちばん大きいもの</summary>
+        public int? PickOutlineRound()
+        {
+            int? best = null;
+            for (int i = 0; i < Doc.Tools.Count; i++)
+            {
+                var t = Doc.Tools[i];
+                if (t.Shape != "round" || (t.D ?? 0) == 0) continue;
+                if (best == null || t.D.Value > Doc.Tools[best.Value].D.Value) best = i;
+            }
+            return best;
+        }
 
         /// <summary>外形の輪郭を抜く金型: 長方形の金型のうち、いちばん大きいもの</summary>
         public int? PickOutlineTool()
@@ -335,11 +364,15 @@ namespace SetPressCam
             var holes = HolesOf(k);
             var hits = new List<Hit>();
             var warn = new List<string>();
-            if (!Doc.Tools.Any(IsRectTool)) warn.Add("長方形の金型がありません。「金型」で決めてください。");
+            var oc = OuterCircle(k);
+            if ((oc == null || holes.Count > 0) && !Doc.Tools.Any(IsRectTool)) warn.Add("長方形の金型がありません。「金型」で決めてください。");
+            // 丸の外形にかかる切り欠きは、まだ抜けない
+            if (oc != null && NotchesOf(k).Count > 0) warn.Add("丸の外形にかかる切り欠き " + NotchesOf(k).Count + " 個は、まだ抜けません。抜いていません。");
             var box = OuterRect(k);
             const double E = 1e-6;
-            var outerPoly = Shapes[Info.Outers[k].Shape].Poly;
-            var pieces = Geo.CutPieces(outerPoly, holes.Concat(NotchesOf(k)).Select(s => s.Poly).ToList(), box);
+            // 丸の外形は、囲む四角を外形として穴だけを分ける（切り欠き・欠けた所はない）
+            var outerPoly = oc != null ? new List<V> { new V(box.X0, box.Y0), new V(box.X1, box.Y0), new V(box.X1, box.Y1), new V(box.X0, box.Y1) } : Shapes[Info.Outers[k].Shape].Poly;
+            var pieces = Geo.CutPieces(outerPoly, holes.Concat(oc != null ? new List<Shape>() : NotchesOf(k)).Select(s => s.Poly).ToList(), box);
             Func<List<V>, bool> onBox = poly => poly.Any(v => Math.Abs(v.X - box.X0) < E || Math.Abs(v.X - box.X1) < E || Math.Abs(v.Y - box.Y0) < E || Math.Abs(v.Y - box.Y1) < E);
             var holePieces = pieces.Where(p => !onBox(p)).ToList();
             for (int i = 0; i < holePieces.Count; i++)
@@ -432,7 +465,24 @@ namespace SetPressCam
                 Js.Sort(nh, order);
                 hits.AddRange(nh);
             }
-            // 最後に F13 で輪郭を抜く。金型寸法のぶん外側にオフセットした長方形を入れる
+            // 最後に輪郭を抜く。丸の外形は、丸の金型のうちいちばん大きいもので外形の外側を追い抜き（F5）する。
+            // 金型が外形の外側を通るように、F5 の直径を 外形 + 金型直径 × 2 にする（金型の内側の縁が外形をなぞる）
+            if (oc != null)
+            {
+                var tool = PickOutlineRound();
+                double t = NibbleT();
+                if (tool == null) warn.Add("外形の丸を抜く丸の金型がありません。「金型」で丸の金型を決めてください。");
+                else if (t > 10) warn.Add("板厚が 10 mm を超えるので、外形の丸を追い抜きで抜けません。");
+                else
+                {
+                    double dd = Doc.Tools[tool.Value].D.Value, rr = oc.R + dd;
+                    double pitch = Round(Math.Min(Math.Min(2 * t, 10), oc.R + dd / 2));
+                    if (pitch < t - 1e-9) warn.Add("外形の丸が小さく、板厚以上のピッチで追い抜きできません。");
+                    else hits.Add(new Hit { Tool = tool, X0 = Round(oc.X - rr), Y0 = Round(oc.Y - rr), X1 = Round(oc.X + rr), Y1 = Round(oc.Y + rr), Macro = "F5", Pitch = pitch, Kind = "outline" });
+                }
+            }
+            // 長方形などは F13 で輪郭を抜く。金型寸法のぶん外側にオフセットした長方形を入れる
+            else
             {
                 var t = outlineTool == null ? null : Doc.Tools[outlineTool.Value];
                 double dw = t != null ? t.W.Value : 0, dh = t != null ? t.H.Value : 0;
@@ -453,7 +503,7 @@ namespace SetPressCam
             KeepSheetDims(k, before);
             LayoutHit = null;
             Changed();
-            FlashMsg("S" + (k + 1) + " を割り付けました（穴 " + holes.Count + " 個" + (circ.Count > 0 ? "・丸穴 " + circ.Count + " 個" : "") + (notches.Count > 0 ? "・切り欠き " + notches.Count + " 個" : "") + "・外形 F13）");
+            FlashMsg("S" + (k + 1) + " を割り付けました（穴 " + holes.Count + " 個" + (circ.Count > 0 ? "・丸穴 " + circ.Count + " 個" : "") + (notches.Count > 0 ? "・切り欠き " + notches.Count + " 個" : "") + "・外形 " + (oc != null ? "F5" : "F13") + "）");
         }
 
         public void ClearLayout()
@@ -577,7 +627,7 @@ namespace SetPressCam
             int k = LayoutWork.Value;
             var lay = LayoutOf(k);
             var holes = HolesOf(k);
-            int nn = NotchesOf(k).Count + Geo.ComplementPieces(Shapes[Info.Outers[k].Shape].Poly, OuterRect(k)).Count;
+            int nn = NotchesOf(k).Count + (OuterCircle(k) != null ? 0 : Geo.ComplementPieces(Shapes[Info.Outers[k].Shape].Poly, OuterRect(k)).Count);
             int nc = CirclesOf(k).Count;
             summary = "穴 " + holes.Count + " 個" + (nc > 0 ? "・丸穴 " + nc + " 個" : "") + (nn > 0 ? "・切り欠き " + nn + " 個" : "");
             if (lay != null)
@@ -964,7 +1014,9 @@ namespace SetPressCam
                         var h = new Hit { Tool = q.Tool, X0 = Round(q.X0 + o.X), Y0 = Round(q.Y0 + o.Y), X1 = Round(q.X1 + o.X), Y1 = Round(q.Y1 + o.Y), Macro = q.Macro };
                         if (q.Macro == "F13") h.Mj = q.Mj;
                         if (q.Macro == "F5") h.Pitch = Round(q.Pitch);
-                        var was = oldHits.Find(x => sameHit(x, h));
+                        // 丸の外形の追い抜きは、ピッチだけ変えても外形の印を残す
+                        var was = oldHits.Find(x => sameHit(x, h)) ?? (h.Macro == "F5" ? oldHits.Find(x => x.Kind == "outline" && MacroOf(x) == "F5" && x.Tool == h.Tool
+                            && NearC(x.X0, h.X0) && NearC(x.Y0, h.Y0) && NearC(x.X1, h.X1) && NearC(x.Y1, h.Y1)) : null);
                         if (was != null && was.Kind != null) h.Kind = was.Kind;  // 切り欠きの印は、同じ所を抜くものに残す
                         hits.Add(h);
                     }
@@ -1083,7 +1135,8 @@ namespace SetPressCam
                         bool single = MacroOf(h) == "単発";
                         if (MacroOf(h) == "F5")
                         {
-                            madd("; " + (i + 1) + "  丸穴 φ" + Fmt(Round(h.X1 - h.X0)) + "  F5 追い抜き: 中心 XY → 直径 → ピッチ（円同士の直線距離）→ 金型直径 → 板厚", hk, true);
+                            if (h.Kind == "outline") madd("; " + (i + 1) + " 外形 φ" + Fmt(Round(h.X1 - h.X0 - 2 * (t != null ? t.D ?? 0 : 0))) + "  F5 追い抜き（金型が外形の外側を通るように、直径 = 外形 + 金型直径 × 2）: 中心 XY → 直径 → ピッチ → 金型直径 → 板厚", hk, true);
+                            else madd("; " + (i + 1) + "  丸穴 φ" + Fmt(Round(h.X1 - h.X0)) + "  F5 追い抜き: 中心 XY → 直径 → ピッチ（円同士の直線距離）→ 金型直径 → 板厚", hk, true);
                             madd("F5", hk, false);
                             add(mxy((h.X0 + h.X1) / 2 - o.X, o.Y - (h.Y0 + h.Y1) / 2, "中心"), hk, false);
                             Action<double, string> nl = (v, note) => add("    " + Fmt(v).PadRight(16) + "; " + note, hk, false);

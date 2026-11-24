@@ -183,6 +183,16 @@ namespace SetPressCam
             if (drag != null && drag.Kind == "box") DrawBox(g);
         }
 
+        // 図形の形（丸の外形は丸）
+        GraphicsPath ShapePath(Shape s)
+        {
+            if (s.Circle == null) return PolyPath(s.Poly);
+            var path = new GraphicsPath();
+            var c = ToScreen(s.Circle.X, s.Circle.Y); float r = (float)(s.Circle.R * Scale);
+            path.AddEllipse(c.X - r, c.Y - r, 2 * r, 2 * r);
+            return path;
+        }
+
         GraphicsPath PolyPath(List<V> poly)
         {
             var path = new GraphicsPath();
@@ -197,10 +207,12 @@ namespace SetPressCam
             if (!shapes.Any(s => s.Role == "outer")) return;
             using (var region = new Region(new GraphicsPath()))
             {
-                foreach (var s in shapes) if (s.Role == "outer") using (var p = PolyPath(s.Poly)) region.Union(p);
-                foreach (var s in shapes) if (s.Role != "outer") using (var p = PolyPath(s.Poly)) region.Exclude(p);
+                foreach (var s in shapes) if (s.Role == "outer") using (var p = ShapePath(s)) region.Union(p);
+                foreach (var s in shapes) if (s.Role == "hole" || s.Role == "notch") using (var p = PolyPath(s.Poly)) region.Exclude(p);
+                var outerIds = new HashSet<int>(shapes.Where(s => s.Role == "outer" && s.Circle != null).Select(s => s.Circle.Id));
                 foreach (var c in ed.Circles)
                 {
+                    if (outerIds.Contains(c.Id)) continue;  // 丸の外形は塗ったまま
                     var cp = ed.P(c.C); var sc = ToScreen(cp.X, cp.Y); float r = (float)(c.D / 2 * Scale);
                     using (var p = new GraphicsPath()) { p.AddEllipse(sc.X - r, sc.Y - r, 2 * r, 2 * r); region.Exclude(p); }
                 }
@@ -516,7 +528,7 @@ namespace SetPressCam
                                 var a = ed.P(l.A); var c = ed.P(l.B);
                                 g.DrawLine(p, ToScreen(a.X + dx, a.Y + dy), ToScreen(c.X + dx, c.Y + dy));
                             }
-                            foreach (var c in ed.CirclesOf(k.Value))
+                            foreach (var c in ed.Circles.Where(q => ed.Owner(q.C) == k))  // 丸の外形も
                             {
                                 var cp = ed.P(c.C); var sc = ToScreen(cp.X + dx, cp.Y + dy); float rr = (float)(c.D / 2 * Scale);
                                 g.DrawEllipse(p, sc.X - rr, sc.Y - rr, 2 * rr, 2 * rr);
@@ -534,7 +546,7 @@ namespace SetPressCam
             {
                 var sh = ed.Shapes[ed.Info.Outers[k.Value].Shape];
                 using (var p = new Pen(Color.FromArgb(115, COLOR.Selected), 6) { LineJoin = LineJoin.Round })
-                using (var path = PolyPath(sh.Poly)) g.DrawPath(p, path);
+                using (var path = ShapePath(sh)) g.DrawPath(p, path);
             }
             foreach (var lay in ed.Doc.Layouts)
             {
@@ -602,6 +614,18 @@ namespace SetPressCam
                                     g.FillRectangle(fill, qr);
                                     g.DrawRectangle(p, qr.X, qr.Y, qr.Width, qr.Height);
                                 }
+                        }
+                        else if (h.Kind == "outline" && t != null)
+                        {
+                            // 丸の外形の追い抜き: 金型が通る輪
+                            float ri = (float)Math.Max(0, r.Width / 2 - (t.D ?? 0) * Scale), cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
+                            using (var ring = new GraphicsPath(FillMode.Alternate))
+                            {
+                                ring.AddEllipse(r);
+                                ring.AddEllipse(cx - ri, cy - ri, 2 * ri, 2 * ri);
+                                g.FillPath(fill, ring);
+                            }
+                            using (var p = new Pen(COLOR.Selected, 3)) g.DrawEllipse(p, r.X, r.Y, r.Width, r.Height);
                         }
                         else if (ed.CircleHit(h))
                         {

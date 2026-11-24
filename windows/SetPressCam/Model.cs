@@ -344,7 +344,7 @@ namespace SetPressCam
                         double pt = Js.R3(Num(h["pitch"]));
                         hit.Pitch = Finite(pt) && pt > 0 ? pt : 3.2;
                     }
-                    if (Str(h["kind"]) == "notch") hit.Kind = "notch";
+                    if (Str(h["kind"]) == "notch" || Str(h["kind"]) == "outline") hit.Kind = Str(h["kind"]);
                     if (new[] { hit.X0, hit.Y0, hit.X1, hit.Y1 }.All(Finite)) hits.Add(hit);
                 }
                 var org = q["org"] as JsonObject;

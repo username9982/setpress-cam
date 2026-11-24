@@ -126,6 +126,25 @@ def cases():
     d.circle(330, 150, 12)
     d.circle(360, 150, 9)
     out.append(d)
+    # 13: 丸の外形（外形は φ12 で外側を追い抜き）。中に長方形の穴・丸穴、外形にかかる切り欠き（抜けない）。
+    # 離れた小さい丸もワークになる。長方形の外形の辺にかかる丸は丸穴
+    d = Doc('round-outer', [rect_tool(20, 10), {'shape': 'round', 'w': None, 'h': None, 'd': 12, 'note': ''}, ROUND])
+    d.circle(300, 250, 200)
+    d.rect(260, 230, 300, 260)
+    d.circle(350, 250, 8)
+    d.circle(300, 300, 30)
+    d.rect(390, 240, 420, 260)
+    d.circle(600, 250, 50)
+    d.rect(700, 100, 900, 300)
+    d.circle(800, 200, 8)
+    d.circle(900, 150, 20)
+    out.append(d)
+    # 14: 丸の外形の中に丸の外形を描いたもの（中の丸は丸穴）と、丸の金型がない図面
+    d = Doc('round-outer-2', [rect_tool(20, 10), NONE, NONE])
+    d.circle(200, 200, 150)
+    d.circle(200, 200, 40)
+    d.circle(500, 200, 60)
+    out.append(d)
     # 12: 板厚 12（10 mm を超えるので追い抜きできない）
     d = Doc('nibble-thick', [{'shape': 'round', 'w': None, 'h': None, 'd': 12, 'note': ''}, NONE, NONE])
     d.d['sheet']['t'] = 12

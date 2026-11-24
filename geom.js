@@ -75,7 +75,9 @@ const Geo = (() => {
       const minX = Math.min(...pts.map((p) => p.x)), maxY = Math.max(...pts.map((p) => p.y));
       const pick = (f) => pts.slice().sort(f)[0].id;
       outerOf.set(i, outers.length);
-      outers.push({
+      // 丸の外形: 原点は丸を囲む四角の左上、基準は X・Y とも丸の中心
+      const c = s.circle;
+      outers.push(c ? { shape: i, origin: { x: r3(c.x - c.r), y: r3(c.y + c.r) }, ref: { x: s.pointIds[0], y: s.pointIds[0] } } : {
         shape: i,
         origin: { x: minX, y: maxY },
         ref: { x: pick((p, q) => p.x - q.x || q.y - p.y), y: pick((p, q) => q.y - p.y || p.x - q.x) },
@@ -84,6 +86,7 @@ const Geo = (() => {
     const owner = new Map();  // 点 → outers の番号
     shapes.forEach((s, i) => {
       s.outer = outerOf.get(s.role === 'outer' ? i : s.parent);
+      if (s.role === 'circle') return;  // 外形にならない丸（丸穴）は、中心が内側にある外形に入れる（下の outerAt）
       for (const id of s.pointIds) owner.set(id, s.outer);
     });
     // 線でつながった点は、同じ外形に入れる
@@ -102,7 +105,8 @@ const Geo = (() => {
       let best = null;
       outers.forEach((o, k) => {
         const s = shapes[o.shape];
-        if (inside(s.poly, x, y) >= 0 && (best == null || s.area < shapes[outers[best].shape].area)) best = k;
+        const inn = s.circle ? dist2(x - s.circle.x, y - s.circle.y) <= s.circle.r + EPS : inside(s.poly, x, y) >= 0;
+        if (inn && (best == null || s.area < shapes[outers[best].shape].area)) best = k;
       });
       return best;
     };
@@ -113,7 +117,7 @@ const Geo = (() => {
   // 解析: 閉じた図形、外形ごとの原点、方向ごとのまとまりと確定した点
   function analyze(doc) {
     const uf = { x: build(doc, 'x'), y: build(doc, 'y') };
-    const shapes = classifyShapes(closedShapes(doc));
+    const shapes = allShapes(doc);
     const { outers, owner, outerAt } = outerFrames(doc, shapes);
     const anchors = { x: new Set(outers.map((o) => uf.x.find(o.ref.x))), y: new Set(outers.map((o) => uf.y.find(o.ref.y))) };
     const fixedAxis = (pid, axis) => {
@@ -131,7 +135,7 @@ const Geo = (() => {
   // 長さを保ったまま一緒に動かす。ただし、動かさない側や原点の基準のまとまりに届く線は伸び縮みさせる。
   // uf は、この寸法を入れる前の関係で作ったもの。
   function anchorRoots(doc, uf, axis) {
-    const { outers } = outerFrames(doc, classifyShapes(closedShapes(doc)));
+    const { outers } = outerFrames(doc, allShapes(doc));
     return new Set(outers.map((o) => uf.find(o.ref[axis])));
   }
   function applyValue(doc, uf, axis, a, b, value, prefer) {
@@ -235,7 +239,7 @@ const Geo = (() => {
       const s = verts[verts.length - 1];
       if (!dir) {
         const dx = p.x - s.x, dy = p.y - s.y;
-        if (Math.hypot(dx, dy) < T) continue;
+        if (dist2(dx, dy) < T) continue;
         dir = Math.abs(dx) >= Math.abs(dy) ? 'h' : 'v';
         c = dir === 'h' ? s.y : s.x;
         K = p;
@@ -244,7 +248,7 @@ const Geo = (() => {
       const vx = p.x - K.x, vy = p.y - K.y;
       const along = dir === 'h' ? vx : vy, across = dir === 'h' ? vy : vx;
       if (Math.abs(across) <= Math.abs(along)) { K = p; continue; }  // 線の向きに沿って進んでいる
-      if (Math.hypot(vx, vy) < T) continue;  // まだ曲がったとは見なさない
+      if (dist2(vx, vy) < T) continue;  // まだ曲がったとは見なさない
       // 曲がった: K を角にする
       const corner = dir === 'h' ? { x: K.x, y: c } : { x: c, y: K.y };
       verts.push(corner);
@@ -343,6 +347,54 @@ const Geo = (() => {
     return shapes;
   }
 
+  // 図面の丸も、閉じた図形と同じ形で並べる（circle: {id, x, y, r}）。ほかと重ならない丸は外形になる。
+  // poly は 72 角形で近似したもの（塗る・ほかのワークとの重なりを見るなど）。外形・穴の分け方は丸のまま計る
+  function circleShapes(doc) {
+    const out = [];
+    for (const c of doc.circles || []) {
+      const p = pointById(doc, c.c), r = c.d / 2;
+      if (!p || !(r > 0)) continue;
+      const poly = [];
+      for (let i = 0; i < 72; i++) poly.push({ x: p.x + r * Math.cos(i * Math.PI / 36), y: p.y + r * Math.sin(i * Math.PI / 36) });
+      out.push({ lineIds: [], pointIds: [c.c], poly, area: Math.PI * r * r, circle: { id: c.id, x: p.x, y: p.y, r } });
+    }
+    return out;
+  }
+  function allShapes(doc) { return classifyShapes([...closedShapes(doc), ...circleShapes(doc)]); }
+  const dist2 = (dx, dy) => Math.sqrt(dx * dx + dy * dy);  // C# 版と同じ計算にする（Math.hypot は使わない）
+  // 点 (x, y) から線分 ab までの距離
+  function segDist(a, b, x, y) {
+    const dx = b.x - a.x, dy = b.y - a.y, len = dx * dx + dy * dy;
+    const t = len > 0 ? Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / len)) : 0;
+    return dist2(a.x + t * dx - x, a.y + t * dy - y);
+  }
+  function edgeDist(poly, x, y) {
+    let m = Infinity;
+    for (let i = 0; i < poly.length; i++) m = Math.min(m, segDist(poly[i], poly[(i + 1) % poly.length], x, y));
+    return m;
+  }
+  // 図形 s が、外形 b に対してどうか: 'none'（重ならない）、'inside'（内側に収まる）、'cross'（はみ出す・辺に触れる）
+  function relation(b, s) {
+    if (!b.circle && !s.circle) {
+      if (!overlaps(b.poly, s.poly)) return 'none';
+      return s.poly.every((v) => inside(b.poly, v.x, v.y) > 0) && !edgesCross(b.poly, s.poly) ? 'inside' : 'cross';
+    }
+    if (b.circle && s.circle) {
+      const d = dist2(s.circle.x - b.circle.x, s.circle.y - b.circle.y);
+      if (d >= b.circle.r + s.circle.r - EPS) return 'none';
+      return d + s.circle.r < b.circle.r - EPS ? 'inside' : 'cross';
+    }
+    if (b.circle) {
+      const { x, y, r } = b.circle;
+      if (s.poly.every((v) => dist2(v.x - x, v.y - y) < r - EPS)) return 'inside';
+      return inside(s.poly, x, y) >= 0 || edgeDist(s.poly, x, y) < r - EPS ? 'cross' : 'none';
+    }
+    const { x, y, r } = s.circle;
+    const ins = inside(b.poly, x, y), ed = edgeDist(b.poly, x, y);
+    if (ins > 0 && ed > r + EPS) return 'inside';
+    return ins >= 0 || ed < r - EPS ? 'cross' : 'none';
+  }
+
   function polyArea(poly) {
     let s = 0;
     for (let i = 0; i < poly.length; i++) {
@@ -394,16 +446,16 @@ const Geo = (() => {
   // 閉じた図形を、外形・穴・切り欠きに分ける。大きい順に見て、
   // それまでの外形と重なるものは抜く側（外形の内側に収まれば穴、はみ出したり辺に触れたりすれば切り欠き）、
   // 重ならないものは別の外形にする。shape.role と shape.parent（外形の番号）を付ける。
+  // 丸は、外形にならなければ role 'circle'（丸穴。単発か追い抜きで抜く）
   function classifyShapes(shapes) {
     const order = shapes.map((s, i) => i).sort((i, j) => shapes[j].area - shapes[i].area);
     const bases = [];
     for (const i of order) {
       const s = shapes[i];
-      const hit = bases.find((b) => overlaps(shapes[b].poly, s.poly));
+      let hit = null, rel = 'none';
+      for (const b of bases) { rel = relation(shapes[b], s); if (rel !== 'none') { hit = b; break; } }
       if (hit == null) { s.role = 'outer'; s.parent = null; bases.push(i); continue; }
-      const base = shapes[hit].poly;
-      const allInside = s.poly.every((v) => inside(base, v.x, v.y) > 0) && !edgesCross(base, s.poly);
-      s.role = allInside ? 'hole' : 'notch';
+      s.role = s.circle ? 'circle' : rel === 'inside' ? 'hole' : 'notch';
       s.parent = hit;
     }
     return shapes;
@@ -577,6 +629,6 @@ const Geo = (() => {
 
   return {
     EPS, AXES, r3, rectGrow, rectPartitions, rectInside, clipToRect, complementPieces, cutPieces, pointById, lineById, analyze, build, addDim, setDimValue, moveItems,
-    strokeToPolyline, cleanPolyline, deleteLines, closedShapes, classifyShapes, inside, overlaps,
+    strokeToPolyline, cleanPolyline, deleteLines, closedShapes, classifyShapes, allShapes, inside, overlaps,
   };
 })();
