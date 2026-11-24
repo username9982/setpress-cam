@@ -602,7 +602,8 @@ namespace SetPressCam
             Text = name + (ed.Dirty ? " *" : "") + " - " + APP_NAME;
             status.Name_ = name + (ed.Dirty ? " *" : "");
             int fixedLines = doc.Lines.Count(l => ed.Info.FixedLine(l));
-            status.Count = "線 " + doc.Lines.Count + " 本（確定 " + fixedLines + "）・寸法 " + doc.Dims.Count;
+            int nCircles = doc.Circles?.Count ?? 0;
+            status.Count = "線 " + doc.Lines.Count + " 本（確定 " + fixedLines + "）" + (nCircles > 0 ? "・丸 " + nCircles + " 個" : "") + "・寸法 " + doc.Dims.Count;
             status.Prog = doc.Program == null ? "プログラム番号なし" : Model.ProgramText(doc.Program);
             var tools = doc.Tools.Select((t, i) => t.Shape == "none" ? null : "T" + (i + 1) + " " + Model.ToolText(t)).Where(x => x != null).ToList();
             status.Tools = tools.Count > 0 ? string.Join("　", tools) : "金型なし";

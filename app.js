@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.17.13';
+const APP_VERSION = '0.18.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -27,7 +27,8 @@ const PROGRAM_MIN = 1, PROGRAM_MAX = 9999;
 
 function emptyTool() { return { shape: 'none', w: null, h: null, d: null, note: '' }; }
 // points: [{id, x, y}]、lines: [{id, a, b, dir:'h'|'v'}]、
-// dims: [{id, axis:'x'|'y', a, b, value, kind, refs:[{t:'point'|'line', id}]}]（b − a = value）
+// dims: [{id, axis:'x'|'y', a, b, value, kind, refs:[{t:'point'|'line', id}]}]（b − a = value）、
+// circles: [{id, c: 中心の点, d: 直径}]（丸穴。中心は points の点なので、寸法・移動は点と同じ。丸が無い図面には持たない）
 function newDoc() {
   return {
     version: 4,
@@ -162,6 +163,8 @@ function loadUndo() {
 function round(v) { return Math.round(v * 1000) / 1000; }
 
 const P = (id) => Geo.pointById(doc, id);
+const circles = () => doc.circles || [];
+const circleAt = (pid) => circles().find((c) => c.c === pid) || null;  // 中心が pid の丸
 const L = (id) => Geo.lineById(doc, id);
 const D = (id) => doc.dims.find((d) => d.id === id);
 // ワーク原点は外形ごとに、外形を囲む四角の左上。座標は原点から右へ X+、下へ Y+ で表す。
@@ -288,6 +291,7 @@ function draw() {
   originHits = [];
   layoutDims().forEach((lv, i) => { if (doc.dims[i].kind === 'sheet') drawSheetDim(doc.dims[i]); else drawDim(doc.dims[i], lv); });
   for (const l of doc.lines) drawLine(l);
+  for (const c of circles()) drawCircle(c);
   for (const p of doc.points) drawPoint(p);
   info.outers.forEach((fr, k) => drawOrigin(workOrigin(k), k));
   if (drag && drag.kind === 'stroke') drawStroke();
@@ -336,6 +340,11 @@ function drawCopies() {
         ctx.moveTo(p1, q1);
         ctx.lineTo(p2, q2);
       }
+      for (const c of circlesOf(k)) {
+        const p = P(c.c), [cx, cy] = toScreen(p.x + dx, p.y + dy), r = c.d / 2 * view.scale;
+        ctx.moveTo(cx + r, cy);
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      }
       ctx.stroke();
       ctx.fillStyle = ctx.strokeStyle;
       ctx.font = '11px sans-serif';
@@ -371,6 +380,10 @@ function drawFills() {
   f.globalCompositeOperation = 'destination-out';
   f.fillStyle = '#000';
   for (const s of shapes) if (s.role !== 'outer') { path(s); f.fill(); }
+  for (const c of circles()) {
+    const p = P(c.c), [x, y] = toScreen(p.x, p.y);
+    f.beginPath(); f.arc(x, y, c.d / 2 * view.scale, 0, Math.PI * 2); f.fill();
+  }
   f.globalCompositeOperation = 'source-over';
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -385,6 +398,24 @@ function drawLine(l) {
   ctx.lineWidth = isSel('line', l.id) ? 4 : 2.5;
   ctx.lineCap = 'round';
   ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+}
+
+// 丸（丸穴）: 円と、右上に直径 φ。中心の点を選ぶと丸ごと選んだことになる
+function drawCircle(c) {
+  const p = P(c.c);
+  const [x, y] = toScreen(p.x, p.y);
+  const r = c.d / 2 * view.scale;
+  const s = isSel('point', c.c);
+  ctx.save();
+  ctx.strokeStyle = s ? COLOR.selected : info.fixedPoint(c.c) ? COLOR.fixed : COLOR.free;
+  ctx.lineWidth = s ? 4 : 2.5;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = s ? COLOR.selected : COLOR.dim;
+  ctx.font = DIM.font;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(`φ${fmt(c.d)}`, x + r * 0.71 + 3, y - r * 0.71 - 2);
+  ctx.restore();
 }
 
 function drawPoint(p) {
@@ -618,6 +649,21 @@ function drawStroke() {
   ctx.beginPath();
   raw.forEach((p, i) => { const [x, y] = toScreen(p.x, p.y); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
   ctx.stroke();
+  const cr = circleResult(raw);
+  if (cr) {
+    // 丸になる: できあがる円（点線）と直径
+    const [x, y] = toScreen(cr.x, cr.y), r = cr.d / 2 * view.scale;
+    ctx.strokeStyle = COLOR.free;
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([7, 5]);
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = COLOR.free;
+    ctx.textAlign = 'left';
+    ctx.fillText(`φ${fmt(cr.d)}`, x + r * 0.71 + 3, y - r * 0.71 - 2);
+    return;
+  }
   const res = strokeResult(raw);
   if (!res) return;
   ctx.strokeStyle = COLOR.free;
@@ -652,8 +698,52 @@ function nearestPoint(x, y, maxPx, exclude) {
   return best;
 }
 
+// なぞった跡が丸か: 書き始めの近くまで中心のまわりを一周していて、縦横の折れ線より円のほうがよく合えば丸にする。
+// 戻り値 {x, y, d}（中心はグリッドに合わせる。直径はグリッドの間隔に丸め、丸の金型の直径に近ければその直径にする）か null
+function circleResult(raw) {
+  if (raw.length < 12) return null;
+  const xs = raw.map((p) => p.x), ys = raw.map((p) => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const w = maxX - minX, h = maxY - minY;
+  if (Math.min(w, h) * view.scale < 16 || Math.max(w, h) > Math.min(w, h) * 1.35) return null;
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, R = (w + h) / 4;
+  const first = raw[0], last = raw[raw.length - 1];
+  if (Math.hypot(last.x - first.x, last.y - first.y) > Math.max(SNAP_PX / view.scale, R * 0.6)) return null;
+  // 中心のまわりを回った角度
+  let sweep = 0;
+  for (let i = 1; i < raw.length; i++) {
+    let a = Math.atan2(raw[i].y - cy, raw[i].x - cx) - Math.atan2(raw[i - 1].y - cy, raw[i - 1].x - cx);
+    if (a > Math.PI) a -= 2 * Math.PI; else if (a < -Math.PI) a += 2 * Math.PI;
+    sweep += a;
+  }
+  if (Math.abs(sweep) < 2 * Math.PI * 0.8) return null;
+  // 円からのずれと、縦横の折れ線（閉じたもの）からのずれを比べる
+  const ec = raw.reduce((s, p) => s + Math.abs(Math.hypot(p.x - cx, p.y - cy) - R), 0) / raw.length;
+  const verts = Geo.strokeToPolyline(raw, 14 / view.scale);
+  if (verts) {
+    const segs = verts.map((v, i) => [v, verts[(i + 1) % verts.length]]);
+    const segDist = (p, a, b) => {
+      const vx = b.x - a.x, vy = b.y - a.y, l2 = vx * vx + vy * vy;
+      const t = l2 ? Math.max(0, Math.min(1, ((p.x - a.x) * vx + (p.y - a.y) * vy) / l2)) : 0;
+      return Math.hypot(p.x - a.x - t * vx, p.y - a.y - t * vy);
+    };
+    const ep = raw.reduce((s, p) => s + Math.min(...segs.map(([a, b]) => segDist(p, a, b))), 0) / raw.length;
+    if (!(ec < ep * 0.85)) return null;
+  }
+  const step = snapStep();
+  let d = round(Math.max(step, Math.round(2 * R / step) * step));
+  // 丸の金型の直径に近ければ（25% 以内）、いちばん近い金型の直径にする（そのまま単発で抜ける）
+  let best = null;
+  for (const t of doc.tools) {
+    if (t.shape !== 'round' || !t.d || Math.abs(t.d - 2 * R) > 2 * R * 0.25) continue;
+    if (best == null || Math.abs(t.d - 2 * R) < Math.abs(best - 2 * R)) best = t.d;
+  }
+  if (best != null) d = best;
+  return { x: snapAxis(cx, 'x'), y: snapAxis(cy, 'y'), d };
+}
+
 // なぞった跡 → {verts: [{x, y, id?, close?}]}。
-// 角はグリッドに合わせ、両端が既にある点の近くならその点につなぐ。
+// 角はグリッドに合わせ、両端が既にある点の近くならその点につなぐ（丸の中心にはつながない）。
 function strokeResult(raw) {
   const T = 14 / view.scale;
   let verts = Geo.strokeToPolyline(raw, T);
@@ -662,15 +752,16 @@ function strokeResult(raw) {
   const dirs = [];
   for (let i = 1; i < verts.length; i++) dirs.push(Math.abs(verts[i].y - verts[i - 1].y) < Geo.EPS ? 'h' : 'v');
   const n = verts.length;
+  const centers = new Set(circles().map((c) => c.c));
   // 描き始め
-  const ps = nearestPoint(raw[0].x, raw[0].y, SNAP_PX);
+  const ps = nearestPoint(raw[0].x, raw[0].y, SNAP_PX, centers);
   if (ps) {
     verts[0] = { x: ps.x, y: ps.y, id: ps.id };
     if (dirs[0] === 'h') verts[1].y = ps.y; else verts[1].x = ps.x;
   }
   // 描き終わり（描き始めの近くなら閉じる）
   const last = raw[raw.length - 1];
-  let pe = nearestPoint(last.x, last.y, SNAP_PX);
+  let pe = nearestPoint(last.x, last.y, SNAP_PX, centers);
   let close = false;
   if (n >= 4 && Math.hypot(last.x - raw[0].x, last.y - raw[0].y) <= SNAP_PX / view.scale) {
     pe = verts[0]; close = true;
@@ -702,6 +793,17 @@ function strokeResult(raw) {
 }
 
 function commitStroke(raw) {
+  const cr = circleResult(raw);
+  if (cr) {
+    snapshot();
+    const id = newId();
+    doc.points.push({ id, x: cr.x, y: cr.y });
+    if (!doc.circles) doc.circles = [];
+    doc.circles.push({ id: newId(), c: id, d: cr.d });
+    sel = [];
+    changed();
+    return true;
+  }
   const res = strokeResult(raw);
   if (!res) return false;
   snapshot();
@@ -749,7 +851,13 @@ function hitTest(sx, sy) {
     const d = Math.hypot(dx, dy);
     if (d <= bd) { best = l; bd = d; }
   }
-  return best ? { t: 'line', id: best.id } : null;
+  if (best) return { t: 'line', id: best.id };
+  // 丸: 円の線の近くか内側をタップすると、中心の点を選ぶ（丸ごと選ぶ）
+  for (const c of circles()) {
+    const p = P(c.c), d = Math.hypot(wx - p.x, wy - p.y);
+    if (d <= c.d / 2 + 12 / view.scale) return { t: 'point', id: c.c };
+  }
+  return null;
 }
 
 // ---- タッチ・マウス操作 ----
@@ -955,6 +1063,11 @@ function boxSelect(a, b) {
     if (whole.has(info.owner.get(l.a)) && whole.has(info.owner.get(l.b))) continue;
     if (inside(P(l.a)) && inside(P(l.b))) add.push({ t: 'line', id: l.id });
   }
+  for (const c of circles()) {
+    if (whole.has(info.owner.get(c.c))) continue;
+    const p = P(c.c), r = c.d / 2;
+    if (inside({ x: p.x - r, y: p.y - r }) && inside({ x: p.x + r, y: p.y + r })) add.push({ t: 'point', id: c.c });
+  }
   sel = [...sel, ...add.filter((q) => !isSel(q.t, q.id))];
   updateUi();
 }
@@ -1042,6 +1155,12 @@ function dimOptions() {
       const along = l.dir === 'h' ? 'x' : 'y';
       const rows = [{ label: '長さ', axis: along, a: l.a, b: l.b, kind: 'len', refs: [s], prefer: lenPrefer(along, l.a, l.b) }];
       return { title: `線 ${lName(l.id)}（${dirName(l)}・${fixedTxt(info.fixedLine(l))}）`, rows };
+    }
+    if (s.t === 'point' && circleAt(s.id)) {
+      const c = circleAt(s.id);
+      return { title: `丸 φ${fmt(c.d)}（中心 ${pName(s.id)}・${fixedTxt(info.fixedPoint(s.id))}）`,
+        rows: [{ label: '直径 φ', kind: 'dia', circle: c.id }],
+        note: '直径を入れて Enter か「決定」で決まります。もう 1 つ点か線を選ぶと、中心までの距離を入れられます。' };
     }
     if (s.t === 'point') {
       // 外形の原点からの距離の欄はなくした（v0.10.3）。ほかの点・線を選ぶと距離を入れられる
@@ -1144,6 +1263,12 @@ function updateProps() {
     (opt.rows.length ? '数字を入れて Enter か「決定」で決まります。いまの値のままでも決められます。紫の「寸法」は決めた寸法。' : '');
   opt.rows.forEach((r, i) => {
     const input = box.querySelector(`input[data-i="${i}"]`);
+    if (r.kind === 'dia') {
+      const c = circles().find((q) => q.id === r.circle);
+      if (c && document.activeElement !== input) input.value = c.d;
+      input.parentElement.querySelector('.badge').textContent = '';
+      return;
+    }
     if (r.kind === 'sheet') {
       if (document.activeElement !== input) input.value = sheetPos(r.sheet, r.axis);
       input.parentElement.querySelector('.badge').textContent = sheetDimOf(r.sheet, r.axis) ? '寸法' : '';
@@ -1167,6 +1292,17 @@ function commitDim(i, input) {
   v = round(v);
   if (!r.signed && v < 0) v = -v;
   if (r.kind === 'len' && v <= 0) { flash('長さは 0 より大きくしてください'); updateUi(); return; }
+  if (r.kind === 'dia') {
+    // 丸の直径: 寸法ではなく、丸の大きさそのものを変える（選んだままにする）
+    const c = circles().find((q) => q.id === r.circle);
+    if (!c) return;
+    if (v <= 0) { flash('直径は 0 より大きくしてください'); updateUi(); return; }
+    if (v === c.d) { updateUi(); return; }
+    snapshot();
+    c.d = v;
+    changed();
+    return;
+  }
   if (r.kind === 'sheet') {
     // 板の原点から外形の原点までの寸法: 値を覚えて、外形ごと平行移動する
     snapshot();
@@ -1216,6 +1352,14 @@ function deleteSelected() {
     for (const axis of ['x', 'y']) { const d = sheetDimOf(s.id, axis); if (d) dimIds.add(d.id); }
   }
   doc.dims = doc.dims.filter((d) => !dimIds.has(d.id));
+  // 丸は、中心の点を選んで消す（中心の点と、中心に入れた寸法も消す）
+  const gone = new Set(sel.filter((s) => s.t === 'point' && circleAt(s.id)).map((s) => s.id));
+  if (gone.size) {
+    doc.circles = circles().filter((c) => !gone.has(c.c));
+    if (!doc.circles.length) delete doc.circles;
+    doc.points = doc.points.filter((p) => !gone.has(p.id));
+    doc.dims = doc.dims.filter((d) => !gone.has(d.a) && !gone.has(d.b) && !d.refs.some((r) => r.t === 'point' && gone.has(r.id)));
+  }
   if (lineIds.size) Geo.deleteLines(doc, [...lineIds]);
   sel = [];
   changed();
@@ -1230,7 +1374,7 @@ function updateUi() {
   if (document.activeElement !== $('sheet-t')) $('sheet-t').value = doc.sheet.t ?? '';
   $('st-name').textContent = (doc.name || '名前なし') + (dirty ? ' *' : '');
   const fixedLines = doc.lines.filter((l) => info.fixedLine(l)).length;
-  $('st-count').textContent = `線 ${doc.lines.length} 本（確定 ${fixedLines}）・寸法 ${doc.dims.length}`;
+  $('st-count').textContent = `線 ${doc.lines.length} 本（確定 ${fixedLines}）${circles().length ? `・丸 ${circles().length} 個` : ''}・寸法 ${doc.dims.length}`;
   $('st-prog').textContent = doc.program == null ? 'プログラム番号なし' : programText(doc.program);
   $('st-tools').textContent = doc.tools.map((t, i) => (t.shape === 'none' ? null : `T${i + 1} ${toolText(t)}`))
     .filter(Boolean).join('　') || '金型なし';
@@ -1248,7 +1392,8 @@ function updateSelInfo() {
     const s = sel[0];
     if (s.t === 'point' && P(s.id)) {
       const r = rel(sheetTopLeft(), P(s.id).x, P(s.id).y);
-      text = `位置  X ${fmt(r.x)}  Y ${fmt(r.y)}`;
+      const c = circleAt(s.id);
+      text = `${c ? `丸 φ${fmt(c.d)}  中心 ` : '位置  '}X ${fmt(r.x)}  Y ${fmt(r.y)}`;
     } else if (s.t === 'line' && L(s.id)) {
       const l = L(s.id), a = P(l.a), b = P(l.b);
       text = `長さ ${fmt(round(Math.abs(b.x - a.x) + Math.abs(b.y - a.y)))}`;
@@ -1323,11 +1468,14 @@ function layoutOf(k) { return doc.layouts.find((q) => info.owner.get(q.work) ===
 // 外形の穴（いまの形）。割付したときの形と比べて、変わっていないか確かめる
 function holesOf(k) { return shapes.filter((s) => s.role === 'hole' && s.outer === k); }
 function notchesOf(k) { return shapes.filter((s) => s.role === 'notch' && s.outer === k); }
+function circlesOf(k) { return circles().filter((c) => info.owner.get(c.c) === k); }
 function holeSrc(k) {
   const o = info.outers[k].origin;
   const rel2 = (poly) => poly.map((v) => [round(v.x - o.x), round(o.y - v.y)]);
+  const cs = circlesOf(k);
   const src = JSON.stringify(holesOf(k).map((s) => rel2(s.poly)))
-    + (notchesOf(k).length ? `|N${JSON.stringify(notchesOf(k).map((s) => rel2(s.poly)))}` : '');
+    + (notchesOf(k).length ? `|N${JSON.stringify(notchesOf(k).map((s) => rel2(s.poly)))}` : '')
+    + (cs.length ? `|C${JSON.stringify(cs.map((c) => [...rel2([P(c.c)])[0], c.d]))}` : '');
   // 外形を F13 で抜くときは、外形の形も比べる
   return outerRect(k) ? `${src}|${JSON.stringify(rel2(shapes[info.outers[k].shape].poly))}` : src;
 }
@@ -1354,6 +1502,13 @@ function rectHit(r, extra = {}) {
   const single = t && Math.abs(t.w - w) < 1e-6 && Math.abs(t.h - h) < 1e-6;
   return { tool, x0: round(r.x0), y0: round(r.y0), x1: round(r.x1), y1: round(r.y1), ...(single ? { macro: '単発' } : {}), ...extra };
 }
+// 直径 d の丸の金型（番号）。なければ null
+function pickRoundTool(d) {
+  const i = doc.tools.findIndex((t) => t.shape === 'round' && t.d && Math.abs(t.d - d) < 1e-6);
+  return i < 0 ? null : i;
+}
+// 丸の金型で抜いた単発か
+const roundHit = (h) => macroOf(h) === '単発' && h.tool != null && doc.tools[h.tool] && doc.tools[h.tool].shape === 'round';
 // 長方形の金型（番号）のうち、w × h の長方形に入るいちばん大きいもの
 function pickRectTool(w, h) {
   let best = null;
@@ -1463,6 +1618,18 @@ function autoLayout() {
   });
   // 上から下、左から右の順に抜く
   hits.sort((p, q) => q.y1 - p.y1 || p.x0 - q.x0);
+  // 丸穴: 同じ直径の丸の金型で、中心を単発で 1 回抜く。金型ごとにまとめ（金型を替える回数を減らす）、上から下、左から右の順。
+  // 合う金型がない丸は抜かない（大きい丸の追い抜きはまだできない）
+  const circ = circlesOf(k).map((c) => ({ c, p: P(c.c), tool: pickRoundTool(c.d) }));
+  const missing = new Map();
+  for (const q of circ) if (q.tool == null) missing.set(q.c.d, (missing.get(q.c.d) || 0) + 1);
+  for (const [d, n] of missing) warn.push(`丸穴 φ${fmt(d)}（${n} 個）に合う丸の金型がないので、抜いていません。「金型」で φ${fmt(d)} の丸を決めてください。`);
+  circ.filter((q) => q.tool != null)
+    .sort((a, b) => a.tool - b.tool || b.p.y - a.p.y || a.p.x - b.p.x)
+    .forEach(({ c, p, tool }) => {
+      const r = c.d / 2;
+      hits.push({ tool, x0: round(p.x - r), y0: round(p.y - r), x1: round(p.x + r), y1: round(p.y + r), macro: '単発' });
+    });
   // 切り欠き: 外形と重なる所を、単発（金型とちょうど同じ大きさ）か F3 で抜く。ほかのワークにぶつからなければ、
   // 外形の辺の外へ広げて四角く抜き、あとから抜く F13 に金型寸法の約 1/3 かぶるようにする
   // （抜いた輪郭とこれから抜く輪郭がぴったり接すると金型に良くないため）。
@@ -1533,7 +1700,7 @@ function autoLayout() {
   keepSheetDims(k, before);
   layoutHit = null;
   changed();
-  flash(`S${k + 1} を割り付けました（穴 ${holes.length} 個${notches.length ? `・切り欠き ${notches.length} 個` : ''}・外形 F13）`);
+  flash(`S${k + 1} を割り付けました（穴 ${holes.length} 個${circ.length ? `・丸穴 ${circ.length} 個` : ''}${notches.length ? `・切り欠き ${notches.length} 個` : ''}・外形 F13）`);
 }
 function clearLayout() {
   const k = layoutWork;
@@ -1648,7 +1815,8 @@ function updateLayoutPanel() {
   if (k != null) {
     const holes = holesOf(k);
     const nn = notchesOf(k).length + Geo.complementPieces(shapes[info.outers[k].shape].poly, outerRect(k)).length;
-    summary = `穴 ${holes.length} 個` + (nn ? `・切り欠き ${nn} 個` : '');
+    const nc = circlesOf(k).length;
+    summary = `穴 ${holes.length} 個` + (nc ? `・丸穴 ${nc} 個` : '') + (nn ? `・切り欠き ${nn} 個` : '');
     if (lay) {
       const count = (m) => lay.hits.filter((h) => macroOf(h) === m).length;
       summary += `\nF3 ${count('F3')} 回` + (count('単発') ? `\n単発 ${count('単発')} 回` : '') + (count('F13') ? `\nF13 ${count('F13')} 回（外形）` : '');
@@ -1694,18 +1862,24 @@ function drawLayout() {
       ctx.strokeStyle = col;
       ctx.lineWidth = 1.5;
       ctx.setLineDash([5, 3]);
+      const round1 = roundHit(h);
       if (macroOf(h) === 'F13' && h.mj) {
         // ミクロジョイントで角が残るので、抜く帯と単発の形で描く
         for (const q of [...f13Strips(h), ...f13Singles(h)]) {
           const [px, py] = toScreen(q.x0, q.y1), [qx, qy] = toScreen(q.x1, q.y0);
           ctx.strokeRect(px, py, qx - px, qy - py);
         }
+      } else if (round1) {
+        ctx.beginPath(); ctx.arc((ax + bx) / 2, (ay + by) / 2, (bx - ax) / 2, 0, Math.PI * 2); ctx.stroke();
       } else {
         ctx.strokeRect(ax, ay, bx - ax, by - ay);
       }
       ctx.setLineDash([]);
       const t = h.tool == null ? null : doc.tools[h.tool];
-      if (t) {
+      if (round1) {
+        ctx.fillStyle = 'rgba(31, 138, 76, 0.28)';
+        ctx.beginPath(); ctx.arc((ax + bx) / 2, (ay + by) / 2, t.d / 2 * view.scale, 0, Math.PI * 2); ctx.fill();
+      } else if (t) {
         ctx.fillStyle = 'rgba(31, 138, 76, 0.28)';
         ctx.fillRect(ax, ay, t.w * view.scale, t.h * view.scale);
       }
@@ -1735,6 +1909,10 @@ function drawLayout() {
       }
       ctx.fill();
       ctx.lineWidth = 2;
+      ctx.stroke();
+    } else if (roundHit(h)) {
+      ctx.beginPath(); ctx.arc((ax + bx) / 2, (ay + by) / 2, (bx - ax) / 2, 0, Math.PI * 2);
+      ctx.fill();
       ctx.stroke();
     } else {
       ctx.fillRect(ax, ay, bx - ax, by - ay);
@@ -1938,10 +2116,14 @@ function parseCode(text) {
     } else if ((m = c.match(reXY))) {
       // マクロの中の X Y だけの行は単発（金型の中心）
       if (!mac) { err(line, '単発（X Y）は F100〜F110 の中に書いてください'); return; }
-      const t = rectTool(tool, line);
+      // 長方形の金型か丸の金型（丸穴）
+      const q = tool == null ? null : doc.tools[tool];
+      const isRound = q && q.shape === 'round' && q.d;
+      const t = isRound ? q : rectTool(tool, line);
       if (!t) return;
+      const w = isRound ? q.d : t.w, h = isRound ? q.d : t.h;
       const cx = Number(m[1]), cy = -Number(m[2]);
-      mac.hits.push({ tool, x0: cx - t.w / 2, y0: cy - t.h / 2, x1: cx + t.w / 2, y1: cy + t.h / 2, macro: '単発' });
+      mac.hits.push({ tool, x0: cx - w / 2, y0: cy - h / 2, x1: cx + w / 2, y1: cy + h / 2, macro: '単発' });
     } else err(line, '読めない行です');
   });
   if (exp) err(exp.line, `${exp.macro} の続きが足りません`);
@@ -2053,6 +2235,10 @@ function genCode() {
     add('', null);
     add(`; S${k + 1} 割付  T → F100〜F110 でマクロに登録 → F23 で配置。F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法`, null, true);
     if (lay.src !== holeSrc(k)) add('; ※ 割付のあとで図形が変わりました。もう一度自動割付してください', null, true);
+    // 合う丸の金型がなくて抜いていない丸穴
+    const unpunched = circlesOf(k).filter((c) => { const p = P(c.c); return !hs.some((h) => roundHit(h) && nearC(doc.tools[h.tool].d, c.d) && nearC((h.x0 + h.x1) / 2, p.x) && nearC((h.y0 + h.y1) / 2, p.y)); });
+    for (const d of [...new Set(unpunched.map((c) => c.d))])
+      add(`; ※ 丸穴 φ${fmt(d)}（${unpunched.filter((c) => c.d === d).length} 個）は、合う丸の金型がないので抜いていません`, null, true);
     if (!hs.length) { add('; 抜く所がありません', null, true); continue; }
     // F23 のピッチ（書き換えていなければ 金型が抜く形を囲む四角 + 10 mm）と列数
     const f = f23Of(lay);
@@ -2083,7 +2269,7 @@ function genCode() {
         const f13 = macroOf(h) === 'F13';
         const single = macroOf(h) === '単発';
         madd(f13 ? `; ${i + 1} 外形  F13: 開始点（左上）→ 外形 XY → 金型 XY → 角 R（金型寸法のぶん外側）`
-          : `; ${i + 1}${h.kind === 'notch' ? ' 切り欠き' : ''}${single ? '  単発: 金型の中心' : ''}`, hk, true);
+          : `; ${i + 1}${h.kind === 'notch' ? ' 切り欠き' : ''}${roundHit(h) ? `  丸穴 φ${fmt(t.d)}` : ''}${single ? '  単発: 金型の中心' : ''}`, hk, true);
         if (f13) {
           const singles = f13Singles(h);
           if (singles.length) madd('; 単発（短いほうの辺のつながりを、ミクロジョイントの長さまで先に抜く。F13 の帯と約 1/3 重ねる）  金型の中心', hk, true);
@@ -2356,7 +2542,12 @@ function loadDoc(d) {
     }
     for (const q of dims) if (q.kind === 'o') q.kind = 'pp';
   }
-  const maxId = Math.max(0, ...points.map((p) => p.id), ...lines.map((l) => l.id), ...dims.map((q) => q.id));
+  // 丸（中心の点があって、直径が 0 より大きいもの。同じ点を中心にする丸は 1 つだけ）
+  const centerUsed = new Set();
+  const circ = (Array.isArray(d.circles) ? d.circles : [])
+    .map((c) => ({ id: Number(c && c.id), c: Number(c && c.c), d: posNum(c && c.d) }))
+    .filter((c) => Number.isInteger(c.id) && ids.has(c.c) && c.d != null && !centerUsed.has(c.c) && centerUsed.add(c.c));
+  const maxId = Math.max(0, ...points.map((p) => p.id), ...lines.map((l) => l.id), ...dims.map((q) => q.id), ...circ.map((c) => c.id));
   doc = {
     version: 4,
     name: String(d.name || ''),
@@ -2379,6 +2570,7 @@ function loadDoc(d) {
       ...f23Fields(q),
     })),
     nextId: Math.max(Number(d.nextId) || 1, maxId + 1),
+    ...(circ.length ? { circles: circ } : {}),
   };
   sel = [];
   undoStack.length = 0;

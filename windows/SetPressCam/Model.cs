@@ -2,6 +2,7 @@
 //   points: [{id, x, y}]、lines: [{id, a, b, dir:'h'|'v'}]、
 //   dims: [{id, axis:'x'|'y', a, b, value, kind, refs:[{t:'point'|'line', id}], off?}]（b − a = value）
 //   layouts: [{work: 外形を表す点, src: 割付したときの形, hits: [{tool, x0, y0, x1, y1, macro?, kind?, mj?}], warn: [], org: {x, y}}]
+//   circles: [{id, c: 中心の点, d: 直径}]（丸穴。中心は points の点。丸が無い図面には持たない）
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -41,6 +42,14 @@ namespace SetPressCam
         public int A { get; set; }
         public int B { get; set; }
         public string Dir { get; set; }
+    }
+
+    /// <summary>丸（丸穴）。中心は points の点なので、寸法・移動は点と同じ。</summary>
+    public class Circle
+    {
+        public int Id { get; set; }
+        public int C { get; set; }
+        public double D { get; set; }
     }
 
     public class Ref
@@ -109,6 +118,8 @@ namespace SetPressCam
         public List<Line> Lines { get; set; } = new List<Line>();
         public List<Dim> Dims { get; set; } = new List<Dim>();
         public int NextId { get; set; } = 1;
+        /// <summary>丸。無ければ null（JSON に書かない）。</summary>
+        public List<Circle> Circles { get; set; }
     }
 
     /// <summary>選んだ要素 {t:'point'|'line'|'dim'|'origin', id}。</summary>
@@ -290,7 +301,18 @@ namespace SetPressCam
                 }
                 foreach (var q in dims) if (q.Kind == "o") q.Kind = "pp";
             }
-            int maxId = new[] { 0 }.Concat(points.Select(p => p.Id)).Concat(lines.Select(l => l.Id)).Concat(dims.Select(q => q.Id)).Max();
+            // 丸（中心の点があって、直径が 0 より大きいもの。同じ点を中心にする丸は 1 つだけ）
+            var centerUsed = new HashSet<int>();
+            var circles = new List<Circle>();
+            foreach (var q in Arr(d["circles"]).OfType<JsonObject>())
+            {
+                double cid = Num(q["id"]), cc = Num(q["c"]);
+                var cd = PosNum(q["d"]);
+                if (!IsInt(cid) || !IsInt(cc) || !ids.Contains((int)cc) || cd == null || centerUsed.Contains((int)cc)) continue;
+                centerUsed.Add((int)cc);
+                circles.Add(new Circle { Id = (int)cid, C = (int)cc, D = cd.Value });
+            }
+            int maxId = new[] { 0 }.Concat(points.Select(p => p.Id)).Concat(lines.Select(l => l.Id)).Concat(dims.Select(q => q.Id)).Concat(circles.Select(c => c.Id)).Max();
             var sheet = (JsonObject)d["sheet"];
             double sw = Num(sheet["w"]), sh = Num(sheet["h"]);
             var layouts = new List<Layout>();
@@ -340,6 +362,7 @@ namespace SetPressCam
                 Mj = PosNum(d["mj"]) ?? 0,
                 Points = points, Lines = lines, Dims = dims, Layouts = layouts,
                 NextId = Math.Max(Finite(nextId) && nextId != 0 ? (int)nextId : 1, maxId + 1),
+                Circles = circles.Count > 0 ? circles : null,
             };
         }
 

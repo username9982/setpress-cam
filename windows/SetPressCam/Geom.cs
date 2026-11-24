@@ -402,6 +402,7 @@ namespace SetPressCam
             doc.Lines = doc.Lines.Where(l => !del.Contains(l.Id)).ToList();
             var used = new HashSet<int>();
             foreach (var l in doc.Lines) { used.Add(l.A); used.Add(l.B); }
+            if (doc.Circles != null) foreach (var c in doc.Circles) used.Add(c.C);  // 丸の中心の点は残す
             var gone = new HashSet<int>(doc.Points.Where(p => !used.Contains(p.Id)).Select(p => p.Id));
             doc.Points = doc.Points.Where(p => used.Contains(p.Id)).ToList();
             doc.Dims = doc.Dims.Where(d => !gone.Contains(d.A) && !gone.Contains(d.B) &&

@@ -274,12 +274,13 @@ const Geo = (() => {
   }
 
   // ---- 要素の削除 ----
-  // 線を消し、使われなくなった点と、それらを参照する寸法を消す
+  // 線を消し、使われなくなった点と、それらを参照する寸法を消す（丸の中心の点は残す）
   function deleteLines(doc, lineIds) {
     const del = new Set(lineIds);
     doc.lines = doc.lines.filter((l) => !del.has(l.id));
     const used = new Set();
     for (const l of doc.lines) { used.add(l.a); used.add(l.b); }
+    for (const c of doc.circles || []) used.add(c.c);
     const gone = new Set(doc.points.filter((p) => !used.has(p.id)).map((p) => p.id));
     doc.points = doc.points.filter((p) => used.has(p.id));
     doc.dims = doc.dims.filter((d) => !gone.has(d.a) && !gone.has(d.b) &&

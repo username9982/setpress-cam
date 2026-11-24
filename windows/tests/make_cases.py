@@ -37,6 +37,12 @@ class Doc:
     def rect(self, x0, y0, x1, y1):
         self.poly([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
 
+    def circle(self, x, y, dia):
+        """丸（中心 (x, y)、直径 dia）。中心は点として持つ"""
+        c = self.nid()
+        self.d['points'].append({'id': c, 'x': x, 'y': y})
+        self.d.setdefault('circles', []).append({'id': self.nid(), 'c': c, 'd': dia})
+
 
 def rect_tool(w, h):
     return {'shape': 'rect', 'w': w, 'h': h, 'd': None, 'note': ''}
@@ -98,6 +104,18 @@ def cases():
     d.rect(40.1, 60.2, 77.7, 90.9)
     d.rect(300, 50, 420.3, 160.6)
     d.rect(410.3, 70, 430.3, 90)
+    out.append(d)
+    # 10: 丸穴（φ8・φ12 の丸の金型で単発。φ20 は合う金型がない。外形の外の丸は割り付けない）
+    d = Doc('circles', [rect_tool(20, 10), {'shape': 'round', 'w': None, 'h': None, 'd': 12, 'note': ''}, ROUND])
+    d.rect(100, 100, 400, 300)
+    d.rect(130, 230, 180, 260)
+    d.circle(250, 250, 8)
+    d.circle(200, 150, 8)
+    d.circle(320, 250, 12)
+    d.circle(150, 150, 12.5)
+    d.circle(350, 150, 20)
+    d.circle(380, 120, 20)
+    d.circle(600, 200, 8)
     out.append(d)
     # 9: 金型なし
     d = Doc('no-tools', [ROUND, NONE, NONE])

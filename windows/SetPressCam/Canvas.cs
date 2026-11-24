@@ -176,6 +176,7 @@ namespace SetPressCam
                 else DrawDim(g, doc.Dims[i], levels[i] ?? 0);
             }
             foreach (var l in doc.Lines) DrawLine(g, l);
+            foreach (var c in ed.Circles) DrawCircle(g, c);
             foreach (var p in doc.Points) DrawPoint(g, p);
             for (int k = 0; k < ed.Info.Outers.Count; k++) DrawOrigin(g, ed.WorkOrigin(k), k);
             if (drag != null && drag.Kind == "stroke") DrawStroke(g);
@@ -198,6 +199,11 @@ namespace SetPressCam
             {
                 foreach (var s in shapes) if (s.Role == "outer") using (var p = PolyPath(s.Poly)) region.Union(p);
                 foreach (var s in shapes) if (s.Role != "outer") using (var p = PolyPath(s.Poly)) region.Exclude(p);
+                foreach (var c in ed.Circles)
+                {
+                    var cp = ed.P(c.C); var sc = ToScreen(cp.X, cp.Y); float r = (float)(c.D / 2 * Scale);
+                    using (var p = new GraphicsPath()) { p.AddEllipse(sc.X - r, sc.Y - r, 2 * r, 2 * r); region.Exclude(p); }
+                }
                 using (var b = new SolidBrush(COLOR.Fill)) g.FillRegion(b, region);
             }
         }
@@ -209,6 +215,20 @@ namespace SetPressCam
             var col = s ? COLOR.Selected : ed.Info.FixedLine(l) ? COLOR.Fixed : COLOR.Free;
             using (var p = new Pen(col, s ? 4f : 2.5f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                 g.DrawLine(p, ToScreen(a.X, a.Y), ToScreen(b.X, b.Y));
+        }
+
+        // 丸（丸穴）: 円と、右上に直径 φ。中心の点を選ぶと丸ごと選んだことになる
+        void DrawCircle(Graphics g, Circle c)
+        {
+            var cp = ed.P(c.C);
+            var sc = ToScreen(cp.X, cp.Y);
+            float r = (float)(c.D / 2 * Scale);
+            bool s = ed.IsSel("point", c.C);
+            var col = s ? COLOR.Selected : ed.Info.FixedPoint(c.C) ? COLOR.Fixed : COLOR.Free;
+            using (var p = new Pen(col, s ? 4f : 2.5f)) g.DrawEllipse(p, sc.X - r, sc.Y - r, 2 * r, 2 * r);
+            string t = "φ" + Editor.Fmt(c.D);
+            var sz = g.MeasureString(t, F13, PointF.Empty, TYPO);
+            using (var b = new SolidBrush(s ? COLOR.Selected : COLOR.Dim)) g.DrawString(t, F13, b, sc.X + r * 0.71f + 3, sc.Y - r * 0.71f - 2 - sz.Height, TYPO);
         }
 
         void DrawPoint(Graphics g, Point pt)
@@ -432,6 +452,18 @@ namespace SetPressCam
             if (raw.Count < 2) return;
             using (var p = new Pen(Color.FromArgb(128, 138, 150, 163), 6) { LineJoin = LineJoin.Round })
                 g.DrawLines(p, raw.Select(v => ToScreen(v.X, v.Y)).ToArray());
+            var cr = ed.CircleResult(raw, Scale, SnapStep());
+            if (cr != null)
+            {
+                // 丸になる: できあがる円（点線）と直径
+                var sc = ToScreen(cr.X, cr.Y);
+                float r = (float)(cr.D / 2 * Scale);
+                using (var p = new Pen(COLOR.Free, 2.5f) { DashPattern = new[] { 7 / 2.5f, 5 / 2.5f } }) g.DrawEllipse(p, sc.X - r, sc.Y - r, 2 * r, 2 * r);
+                string t = "φ" + Editor.Fmt(cr.D);
+                var sz = g.MeasureString(t, F12, PointF.Empty, TYPO);
+                using (var b = new SolidBrush(COLOR.Free)) g.DrawString(t, F12, b, sc.X + r * 0.71f + 3, sc.Y - r * 0.71f - 2 - sz.Height, TYPO);
+                return;
+            }
             var res = ed.StrokeResult(raw, Scale, SnapStep());
             if (res == null) return;
             using (var p = new Pen(COLOR.Free, 2.5f) { DashPattern = new[] { 7 / 2.5f, 5 / 2.5f } })
@@ -478,11 +510,18 @@ namespace SetPressCam
                             g.DrawRectangle(p, r.X, r.Y, r.Width, r.Height);
                         var col = o ? Color.FromArgb(217, 200, 60, 40) : Color.FromArgb(204, 47, 128, 209);
                         using (var p = new Pen(col, 1.5f) { DashPattern = new[] { 6 / 1.5f, 4 / 1.5f } })
+                        {
                             foreach (var l in ls)
                             {
                                 var a = ed.P(l.A); var c = ed.P(l.B);
                                 g.DrawLine(p, ToScreen(a.X + dx, a.Y + dy), ToScreen(c.X + dx, c.Y + dy));
                             }
+                            foreach (var c in ed.CirclesOf(k.Value))
+                            {
+                                var cp = ed.P(c.C); var sc = ToScreen(cp.X + dx, cp.Y + dy); float rr = (float)(c.D / 2 * Scale);
+                                g.DrawEllipse(p, sc.X - rr, sc.Y - rr, 2 * rr, 2 * rr);
+                            }
+                        }
                         using (var b = new SolidBrush(col)) g.DrawString("S" + (k + 1) + "-" + (j * f.Nx + i + 1), F11, b, r.X + 3, r.Y + 2, TYPO);
                     }
             }
@@ -506,6 +545,7 @@ namespace SetPressCam
                     var h = hs[i];
                     var r = ScreenRect(h.X0, h.Y0, h.X1, h.Y1);
                     var col = h.Tool == null ? COLOR.Missing : COLOR.Layout;
+                    bool round1 = ed.RoundHit(h);
                     using (var p = new Pen(col, 1.5f) { DashPattern = new[] { 5 / 1.5f, 3 / 1.5f } })
                     {
                         if (Editor.MacroOf(h) == "F13" && (h.Mj ?? 0) != 0)
@@ -514,10 +554,16 @@ namespace SetPressCam
                                 var qr = ScreenRect(q.X0, q.Y0, q.X1, q.Y1);
                                 g.DrawRectangle(p, qr.X, qr.Y, qr.Width, qr.Height);
                             }
+                        else if (round1) g.DrawEllipse(p, r.X, r.Y, r.Width, r.Height);
                         else g.DrawRectangle(p, r.X, r.Y, r.Width, r.Height);
                     }
                     var t = h.Tool == null ? null : ed.Doc.Tools[h.Tool.Value];
-                    if (t != null && t.W != null && t.H != null)
+                    if (round1)
+                    {
+                        float rr = (float)(t.D.Value / 2 * Scale), cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
+                        using (var b = new SolidBrush(Color.FromArgb(71, 31, 138, 76))) g.FillEllipse(b, cx - rr, cy - rr, 2 * rr, 2 * rr);
+                    }
+                    else if (t != null && t.W != null && t.H != null)
                         using (var b = new SolidBrush(Color.FromArgb(71, 31, 138, 76))) g.FillRectangle(b, r.X, r.Y, (float)(t.W.Value * Scale), (float)(t.H.Value * Scale));
                     using (var b = new SolidBrush(col))
                         g.DrawString(Editor.MacroOf(h) == "F13" ? (i + 1) + " F13" : (i + 1).ToString(), F12B, b, r.X + 3, r.Y + 2, TYPO);
@@ -545,6 +591,11 @@ namespace SetPressCam
                                     g.FillRectangle(fill, qr);
                                     g.DrawRectangle(p, qr.X, qr.Y, qr.Width, qr.Height);
                                 }
+                        }
+                        else if (ed.RoundHit(h))
+                        {
+                            g.FillEllipse(fill, r);
+                            using (var p = new Pen(COLOR.Selected, 3)) g.DrawEllipse(p, r.X, r.Y, r.Width, r.Height);
                         }
                         else
                         {
@@ -583,7 +634,14 @@ namespace SetPressCam
                 double d = Geo.Hypot(dx, dy);
                 if (d <= bd) { best = l; bd = d; }
             }
-            return best != null ? new Sel("line", best.Id) : null;
+            if (best != null) return new Sel("line", best.Id);
+            // 丸: 円の線の近くか内側をクリックすると、中心の点を選ぶ（丸ごと選ぶ）
+            foreach (var c in ed.Circles)
+            {
+                var cp = ed.P(c.C);
+                if (Geo.Hypot(w.X - cp.X, w.Y - cp.Y) <= c.D / 2 + 12 / Scale) return new Sel("point", c.C);
+            }
+            return null;
         }
 
         // ---- マウス ----

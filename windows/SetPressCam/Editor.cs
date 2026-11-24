@@ -19,7 +19,14 @@ namespace SetPressCam
         public int A, B;
         public List<Sel> Refs;
         public int? SheetK;
+        public int? CircleId;  // Kind "dia"（丸の直径）のときの丸
         public bool Signed, Neg;
+    }
+
+    /// <summary>なぞった跡を丸にしたもの（中心と直径）。</summary>
+    public class CircleRes
+    {
+        public double X, Y, D;
     }
 
     public class DimOptions
@@ -140,6 +147,10 @@ namespace SetPressCam
         public Point P(int id) { return Geo.PointById(Doc, id); }
         public Line L(int id) { return Geo.LineById(Doc, id); }
         public Dim D(int id) { return Doc.Dims.Find(d => d.Id == id); }
+        /// <summary>丸の一覧（無ければ空）。</summary>
+        public List<Circle> Circles { get { return Doc.Circles ?? new List<Circle>(); } }
+        /// <summary>中心が pid の丸。</summary>
+        public Circle CircleAt(int pid) { return Doc.Circles?.Find(c => c.C == pid); }
         public int? Owner(int pid) { return Info.OwnerOf(pid); }
 
         // 板の原点からの寸法（kind 'sheet'）に合わせて、外形を穴・切り欠き・つながった線ごと平行移動する。
@@ -219,19 +230,66 @@ namespace SetPressCam
         // ---- なぞった線を図形にする ----
         public const double SNAP_PX = 18;
 
-        public Point NearestPoint(double x, double y, double maxPx, double scale)
+        public Point NearestPoint(double x, double y, double maxPx, double scale, HashSet<int> exclude = null)
         {
             Point best = null;
             double bd = maxPx / scale;
             foreach (var p in Doc.Points)
             {
+                if (exclude != null && exclude.Contains(p.Id)) continue;
                 double d = Geo.Hypot(p.X - x, p.Y - y);
                 if (d <= bd) { best = p; bd = d; }
             }
             return best;
         }
 
-        /// <summary>なぞった跡 → 頂点の列。角はグリッドに合わせ、両端が既にある点の近くならその点につなぐ。</summary>
+        /// <summary>なぞった跡が丸か: 書き始めの近くまで中心のまわりを一周していて、縦横の折れ線より円のほうがよく合えば丸にする。
+        /// 中心はグリッドに合わせ、直径はグリッドの間隔に丸める。丸の金型の直径に近ければその直径にする（app.js の circleResult）。</summary>
+        public CircleRes CircleResult(List<V> raw, double scale, double step)
+        {
+            if (raw.Count < 12) return null;
+            double minX = raw.Min(p => p.X), maxX = raw.Max(p => p.X), minY = raw.Min(p => p.Y), maxY = raw.Max(p => p.Y);
+            double w = maxX - minX, h = maxY - minY;
+            if (Math.Min(w, h) * scale < 16 || Math.Max(w, h) > Math.Min(w, h) * 1.35) return null;
+            double cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, R = (w + h) / 4;
+            var first = raw[0]; var last = raw[raw.Count - 1];
+            if (Geo.Hypot(last.X - first.X, last.Y - first.Y) > Math.Max(SNAP_PX / scale, R * 0.6)) return null;
+            // 中心のまわりを回った角度
+            double sweep = 0;
+            for (int i = 1; i < raw.Count; i++)
+            {
+                double a = Math.Atan2(raw[i].Y - cy, raw[i].X - cx) - Math.Atan2(raw[i - 1].Y - cy, raw[i - 1].X - cx);
+                if (a > Math.PI) a -= 2 * Math.PI; else if (a < -Math.PI) a += 2 * Math.PI;
+                sweep += a;
+            }
+            if (Math.Abs(sweep) < 2 * Math.PI * 0.8) return null;
+            // 円からのずれと、縦横の折れ線（閉じたもの）からのずれを比べる
+            double ec = raw.Sum(p => Math.Abs(Geo.Hypot(p.X - cx, p.Y - cy) - R)) / raw.Count;
+            var verts = Geo.StrokeToPolyline(raw, 14 / scale);
+            if (verts != null)
+            {
+                Func<V, V, V, double> segDist = (p, a, b) =>
+                {
+                    double vx = b.X - a.X, vy = b.Y - a.Y, l2 = vx * vx + vy * vy;
+                    double t = l2 != 0 ? Math.Max(0, Math.Min(1, ((p.X - a.X) * vx + (p.Y - a.Y) * vy) / l2)) : 0;
+                    return Geo.Hypot(p.X - a.X - t * vx, p.Y - a.Y - t * vy);
+                };
+                double ep = raw.Sum(p => Enumerable.Range(0, verts.Count).Min(i => segDist(p, verts[i], verts[(i + 1) % verts.Count]))) / raw.Count;
+                if (!(ec < ep * 0.85)) return null;
+            }
+            double d = Round(Math.Max(step, Js.MathRound(2 * R / step) * step));
+            // 丸の金型の直径に近ければ（25% 以内）、いちばん近い金型の直径にする（そのまま単発で抜ける）
+            double? best = null;
+            foreach (var t in Doc.Tools)
+            {
+                if (t.Shape != "round" || (t.D ?? 0) == 0 || Math.Abs(t.D.Value - 2 * R) > 2 * R * 0.25) continue;
+                if (best == null || Math.Abs(t.D.Value - 2 * R) < Math.Abs(best.Value - 2 * R)) best = t.D.Value;
+            }
+            if (best != null) d = best.Value;
+            return new CircleRes { X = SnapAxis(cx, "x", step), Y = SnapAxis(cy, "y", step), D = d };
+        }
+
+        /// <summary>なぞった跡 → 頂点の列。角はグリッドに合わせ、両端が既にある点の近くならその点につなぐ（丸の中心にはつながない）。</summary>
         public List<SV> StrokeResult(List<V> raw, double scale, double step)
         {
             double T = 14 / scale;
@@ -241,14 +299,15 @@ namespace SetPressCam
             var dirs = new List<string>();
             for (int i = 1; i < verts.Count; i++) dirs.Add(Math.Abs(verts[i].Y - verts[i - 1].Y) < Geo.EPS ? "h" : "v");
             int n = verts.Count;
-            var ps = NearestPoint(raw[0].X, raw[0].Y, SNAP_PX, scale);
+            var centers = new HashSet<int>(Circles.Select(c => c.C));
+            var ps = NearestPoint(raw[0].X, raw[0].Y, SNAP_PX, scale, centers);
             if (ps != null)
             {
                 verts[0] = new SV(ps.X, ps.Y) { Id = ps.Id };
                 if (dirs[0] == "h") verts[1].Y = ps.Y; else verts[1].X = ps.X;
             }
             var last = raw[raw.Count - 1];
-            var pe0 = NearestPoint(last.X, last.Y, SNAP_PX, scale);
+            var pe0 = NearestPoint(last.X, last.Y, SNAP_PX, scale, centers);
             SV pe = pe0 == null ? null : new SV(pe0.X, pe0.Y) { Id = pe0.Id };
             bool close = false;
             if (n >= 4 && Geo.Hypot(last.X - raw[0].X, last.Y - raw[0].Y) <= SNAP_PX / scale)
@@ -284,6 +343,18 @@ namespace SetPressCam
 
         public bool CommitStroke(List<V> raw, double scale, double step)
         {
+            var cr = CircleResult(raw, scale, step);
+            if (cr != null)
+            {
+                Snapshot();
+                int cid = NewId();
+                Doc.Points.Add(new Point { Id = cid, X = cr.X, Y = cr.Y });
+                if (Doc.Circles == null) Doc.Circles = new List<Circle>();
+                Doc.Circles.Add(new Circle { Id = NewId(), C = cid, D = cr.D });
+                Sel = new List<Sel>();
+                Changed();
+                return true;
+            }
             var res = StrokeResult(raw, scale, step);
             if (res == null) return false;
             Snapshot();
@@ -337,6 +408,13 @@ namespace SetPressCam
                 int? ka = Owner(l.A), kb = Owner(l.B);
                 if (ka != null && kb != null && whole.Contains(ka.Value) && whole.Contains(kb.Value)) continue;
                 if (inside(P(l.A)) && inside(P(l.B))) add.Add(new Sel("line", l.Id));
+            }
+            foreach (var c in Circles)
+            {
+                var kc = Owner(c.C);
+                if (kc != null && whole.Contains(kc.Value)) continue;
+                var p = P(c.C); double r = c.D / 2;
+                if (inside(new Point { X = p.X - r, Y = p.Y - r }) && inside(new Point { X = p.X + r, Y = p.Y + r })) add.Add(new Sel("point", c.C));
             }
             Sel = Sel.Concat(add.Where(q => !IsSel(q.T, q.Id))).ToList();
         }
@@ -414,6 +492,16 @@ namespace SetPressCam
                         Rows = new List<DimRow> { new DimRow { Label = "長さ", Axis = along, A = l.A, B = l.B, Kind = "len", Refs = new List<Sel> { s.Clone() }, Prefer = lenPrefer(along, l.A, l.B) } },
                     };
                 }
+                if (s.T == "point" && CircleAt(s.Id) != null)
+                {
+                    var c = CircleAt(s.Id);
+                    return new DimOptions
+                    {
+                        Title = "丸 φ" + Fmt(c.D) + "（中心 " + PName(s.Id) + "・" + fixedTxt(Info.FixedPoint(s.Id)) + "）",
+                        Rows = new List<DimRow> { new DimRow { Label = "直径 φ", Kind = "dia", CircleId = c.Id, Axis = "x", A = s.Id, B = s.Id, Refs = new List<Sel>() } },
+                        Note = "直径を入れて Enter か「決定」で決まります。もう 1 つ点か線を選ぶと、中心までの距離を入れられます。",
+                    };
+                }
                 if (s.T == "point")
                     return new DimOptions
                     {
@@ -480,6 +568,7 @@ namespace SetPressCam
         /// <summary>欄に出す、いまの値。</summary>
         public double RowValue(DimRow r)
         {
+            if (r.Kind == "dia") { var c = Circles.Find(q => q.Id == r.CircleId); return c != null ? c.D : 0; }
             if (r.Kind == "sheet") return SheetPos(r.SheetK.Value, r.Axis);
             double cur = Get(P(r.B), r.Axis) - Get(P(r.A), r.Axis);
             return Round(r.Signed ? (r.Neg ? -cur : cur) : Math.Abs(cur));
@@ -487,6 +576,7 @@ namespace SetPressCam
 
         public bool RowHasDim(DimRow r)
         {
+            if (r.Kind == "dia") return false;
             if (r.Kind == "sheet") return SheetDimOf(r.SheetK.Value, r.Axis) != null;
             return FindDim(r.Axis, r.Refs, r.Kind) != null;
         }
@@ -503,6 +593,18 @@ namespace SetPressCam
             v = Round(v);
             if (!r.Signed && v < 0) v = -v;
             if (r.Kind == "len" && v <= 0) { FlashMsg("長さは 0 より大きくしてください"); Refreshed?.Invoke(); return; }
+            if (r.Kind == "dia")
+            {
+                // 丸の直径: 寸法ではなく、丸の大きさそのものを変える（選んだままにする）
+                var c = Circles.Find(q => q.Id == r.CircleId);
+                if (c == null) return;
+                if (v <= 0) { FlashMsg("直径は 0 より大きくしてください"); Refreshed?.Invoke(); return; }
+                if (v == c.D) { Refreshed?.Invoke(); return; }
+                Snapshot();
+                c.D = v;
+                Changed();
+                return;
+            }
             if (r.Kind == "sheet")
             {
                 Snapshot();
@@ -549,6 +651,15 @@ namespace SetPressCam
                 foreach (var axis in new[] { "x", "y" }) { var d = SheetDimOf(s.Id, axis); if (d != null) dimIds.Add(d.Id); }
             }
             Doc.Dims = Doc.Dims.Where(d => !dimIds.Contains(d.Id)).ToList();
+            // 丸は、中心の点を選んで消す（中心の点と、中心に入れた寸法も消す）
+            var gone = new HashSet<int>(Sel.Where(s => s.T == "point" && CircleAt(s.Id) != null).Select(s => s.Id));
+            if (gone.Count > 0)
+            {
+                Doc.Circles = Circles.Where(c => !gone.Contains(c.C)).ToList();
+                if (Doc.Circles.Count == 0) Doc.Circles = null;
+                Doc.Points = Doc.Points.Where(p => !gone.Contains(p.Id)).ToList();
+                Doc.Dims = Doc.Dims.Where(d => !gone.Contains(d.A) && !gone.Contains(d.B) && !d.Refs.Any(r => r.T == "point" && gone.Contains(r.Id))).ToList();
+            }
             if (lineIds.Count > 0) Geo.DeleteLines(Doc, lineIds);
             Sel = new List<Sel>();
             Changed();
@@ -562,7 +673,8 @@ namespace SetPressCam
             if (s.T == "point" && P(s.Id) != null)
             {
                 var r = Rel(SheetTopLeft(), P(s.Id).X, P(s.Id).Y);
-                return "位置  X " + Fmt(r.X) + "  Y " + Fmt(r.Y);
+                var c = CircleAt(s.Id);
+                return (c != null ? "丸 φ" + Fmt(c.D) + "  中心 " : "位置  ") + "X " + Fmt(r.X) + "  Y " + Fmt(r.Y);
             }
             if (s.T == "line" && L(s.Id) != null)
             {

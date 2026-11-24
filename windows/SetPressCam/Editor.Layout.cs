@@ -85,6 +85,7 @@ namespace SetPressCam
         public Layout LayoutOf(int k) { return Doc.Layouts.Find(q => Owner(q.Work) == k); }
         public List<Shape> HolesOf(int k) { return Shapes.Where(s => s.Role == "hole" && s.Outer == k).ToList(); }
         public List<Shape> NotchesOf(int k) { return Shapes.Where(s => s.Role == "notch" && s.Outer == k).ToList(); }
+        public List<Circle> CirclesOf(int k) { return Circles.Where(c => Owner(c.C) == k).ToList(); }
 
         // JSON.stringify と同じ書き方
         static string PolysJson(IEnumerable<List<V>> polys, V o)
@@ -110,7 +111,9 @@ namespace SetPressCam
         {
             var o = Info.Outers[k].Origin;
             var notches = NotchesOf(k);
-            string src = PolysJson(HolesOf(k).Select(s => s.Poly), o) + (notches.Count > 0 ? "|N" + PolysJson(notches.Select(s => s.Poly), o) : "");
+            var cs = CirclesOf(k);
+            string src = PolysJson(HolesOf(k).Select(s => s.Poly), o) + (notches.Count > 0 ? "|N" + PolysJson(notches.Select(s => s.Poly), o) : "")
+                + (cs.Count > 0 ? "|C[" + string.Join(",", cs.Select(c => { var p = P(c.C); return "[" + Js.Num(Round(p.X - o.X)) + "," + Js.Num(Round(o.Y - p.Y)) + "," + Js.Num(c.D) + "]"; })) + "]" : "");
             return src + "|" + PolyJson(Shapes[Info.Outers[k].Shape].Poly, o);
         }
 
@@ -135,6 +138,24 @@ namespace SetPressCam
                 if (best == null || Area(t) > Area(Doc.Tools[best.Value])) best = i;
             }
             return best;
+        }
+
+        /// <summary>直径 d の丸の金型（番号）。なければ null</summary>
+        public int? PickRoundTool(double d)
+        {
+            for (int i = 0; i < Doc.Tools.Count; i++)
+            {
+                var t = Doc.Tools[i];
+                if (t.Shape == "round" && (t.D ?? 0) != 0 && Math.Abs(t.D.Value - d) < 1e-6) return i;
+            }
+            return null;
+        }
+
+        /// <summary>丸の金型で抜いた単発か</summary>
+        public bool RoundHit(Hit h)
+        {
+            if (MacroOf(h) != "単発" || h.Tool == null || h.Tool.Value < 0 || h.Tool.Value >= Doc.Tools.Count) return false;
+            return Doc.Tools[h.Tool.Value].Shape == "round";
         }
 
         /// <summary>長方形の金型（番号）のうち、w × h の長方形に入るいちばん大きいもの</summary>
@@ -286,6 +307,25 @@ namespace SetPressCam
             // 上から下、左から右の順に抜く
             Comparison<Hit> order = (p, q) => q.Y1 != p.Y1 ? Js.Cmp(q.Y1 - p.Y1) : Js.Cmp(p.X0 - q.X0);
             Js.Sort(hits, order);
+            // 丸穴: 同じ直径の丸の金型で、中心を単発で 1 回抜く。金型ごとにまとめ（金型を替える回数を減らす）、上から下、左から右の順。
+            // 合う金型がない丸は抜かない（大きい丸の追い抜きはまだできない）
+            var circ = CirclesOf(k).Select(c => new { c, p = P(c.C), tool = PickRoundTool(c.D) }).ToList();
+            var missD = new List<double>();
+            var missN = new Dictionary<double, int>();
+            foreach (var q in circ)
+            {
+                if (q.tool != null) continue;
+                if (!missN.ContainsKey(q.c.D)) { missN[q.c.D] = 0; missD.Add(q.c.D); }
+                missN[q.c.D]++;
+            }
+            foreach (var dd in missD) warn.Add("丸穴 φ" + Fmt(dd) + "（" + missN[dd] + " 個）に合う丸の金型がないので、抜いていません。「金型」で φ" + Fmt(dd) + " の丸を決めてください。");
+            var cHits = circ.Where(q => q.tool != null).ToList();
+            Js.Sort(cHits, (a, b) => a.tool != b.tool ? a.tool.Value - b.tool.Value : a.p.Y != b.p.Y ? Js.Cmp(b.p.Y - a.p.Y) : Js.Cmp(a.p.X - b.p.X));
+            foreach (var q in cHits)
+            {
+                double r = q.c.D / 2;
+                hits.Add(new Hit { Tool = q.tool, X0 = Round(q.p.X - r), Y0 = Round(q.p.Y - r), X1 = Round(q.p.X + r), Y1 = Round(q.p.Y + r), Macro = "単発" });
+            }
             // 切り欠き: 外形と重なる所を、単発（金型とちょうど同じ大きさ）か F3 で抜く。ほかのワークにぶつからなければ、
             // 外形の辺の外へ広げて四角く抜き、あとから抜く F13 に金型寸法の約 1/3 かぶるようにする
             var notches = pieces.Where(onBox).ToList();
@@ -356,7 +396,7 @@ namespace SetPressCam
             KeepSheetDims(k, before);
             LayoutHit = null;
             Changed();
-            FlashMsg("S" + (k + 1) + " を割り付けました（穴 " + holes.Count + " 個" + (notches.Count > 0 ? "・切り欠き " + notches.Count + " 個" : "") + "・外形 F13）");
+            FlashMsg("S" + (k + 1) + " を割り付けました（穴 " + holes.Count + " 個" + (circ.Count > 0 ? "・丸穴 " + circ.Count + " 個" : "") + (notches.Count > 0 ? "・切り欠き " + notches.Count + " 個" : "") + "・外形 F13）");
         }
 
         public void ClearLayout()
@@ -481,7 +521,8 @@ namespace SetPressCam
             var lay = LayoutOf(k);
             var holes = HolesOf(k);
             int nn = NotchesOf(k).Count + Geo.ComplementPieces(Shapes[Info.Outers[k].Shape].Poly, OuterRect(k)).Count;
-            summary = "穴 " + holes.Count + " 個" + (nn > 0 ? "・切り欠き " + nn + " 個" : "");
+            int nc = CirclesOf(k).Count;
+            summary = "穴 " + holes.Count + " 個" + (nc > 0 ? "・丸穴 " + nc + " 個" : "") + (nn > 0 ? "・切り欠き " + nn + " 個" : "");
             if (lay != null)
             {
                 Func<string, int> count = m => lay.Hits.Count(h => MacroOf(h) == m);
@@ -752,10 +793,14 @@ namespace SetPressCam
                 {
                     // マクロの中の X Y だけの行は単発（金型の中心）
                     if (mac == null) { err(line, "単発（X Y）は F100〜F110 の中に書いてください"); continue; }
-                    var t = rectTool(tool, line);
+                    // 長方形の金型か丸の金型（丸穴）
+                    var q = tool == null ? null : Doc.Tools[tool.Value];
+                    bool isRound = q != null && q.Shape == "round" && (q.D ?? 0) != 0;
+                    var t = isRound ? q : rectTool(tool, line);
                     if (t == null) continue;
+                    double tw = isRound ? q.D.Value : t.W.Value, th = isRound ? q.D.Value : t.H.Value;
                     double cx = PNum(m.Groups[1].Value), cy = -PNum(m.Groups[2].Value);
-                    mac.Hits.Add(new PHit { Tool = tool, X0 = cx - t.W.Value / 2, Y0 = cy - t.H.Value / 2, X1 = cx + t.W.Value / 2, Y1 = cy + t.H.Value / 2, Macro = "単発" });
+                    mac.Hits.Add(new PHit { Tool = tool, X0 = cx - tw / 2, Y0 = cy - th / 2, X1 = cx + tw / 2, Y1 = cy + th / 2, Macro = "単発" });
                 }
                 else err(line, "読めない行です");
             }
@@ -894,6 +939,14 @@ namespace SetPressCam
                 add("", null, false);
                 add("; S" + (k + 1) + " 割付  T → F100〜F110 でマクロに登録 → F23 で配置。F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法", null, true);
                 if (lay.Src != HoleSrc(k.Value)) add("; ※ 割付のあとで図形が変わりました。もう一度自動割付してください", null, true);
+                // 合う丸の金型がなくて抜いていない丸穴
+                var unp = CirclesOf(k.Value).Where(c =>
+                {
+                    var p = P(c.C);
+                    return !hs.Any(h => RoundHit(h) && NearC(Doc.Tools[h.Tool.Value].D ?? 0, c.D) && NearC((h.X0 + h.X1) / 2, p.X) && NearC((h.Y0 + h.Y1) / 2, p.Y));
+                }).ToList();
+                foreach (var dd in unp.Select(c => c.D).Distinct())
+                    add("; ※ 丸穴 φ" + Fmt(dd) + "（" + unp.Count(c => c.D == dd) + " 個）は、合う丸の金型がないので抜いていません", null, true);
                 if (hs.Count == 0) { add("; 抜く所がありません", null, true); continue; }
                 // F23 のピッチ（書き換えていなければ 金型が抜く形を囲む四角 + 10 mm）と列数
                 var f = F23Of(lay);
@@ -929,7 +982,7 @@ namespace SetPressCam
                         bool f13 = MacroOf(h) == "F13";
                         bool single = MacroOf(h) == "単発";
                         madd(f13 ? "; " + (i + 1) + " 外形  F13: 開始点（左上）→ 外形 XY → 金型 XY → 角 R（金型寸法のぶん外側）"
-                            : "; " + (i + 1) + (h.Kind == "notch" ? " 切り欠き" : "") + (single ? "  単発: 金型の中心" : ""), hk, true);
+                            : "; " + (i + 1) + (h.Kind == "notch" ? " 切り欠き" : "") + (RoundHit(h) ? "  丸穴 φ" + Fmt(t.D ?? 0) : "") + (single ? "  単発: 金型の中心" : ""), hk, true);
                         if (f13)
                         {
                             var singles = F13Singles(h);
