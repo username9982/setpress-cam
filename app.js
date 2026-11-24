@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.20.1';
+const APP_VERSION = '0.20.2';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1571,6 +1571,35 @@ function nibblePoints(h) {
   // Y は上へ正。真上から時計回り（右 → 下 → 左）
   return Array.from({ length: n }, (v, i) => [cx + rho * Math.sin(i * step), cy + rho * Math.cos(i * step)]);
 }
+// 追い抜きで実際に抜く形の縁（金型の丸を重ねた形の、外側と内側の縁）。金型の丸ごとに、ほかの丸に隠れない弧を返す
+// {r, arcs: [{x, y, a0, a1}]}（角度は Y を上へ正にした反時計回り、0〜2π）
+function nibbleArcs(h) {
+  const t = doc.tools[h.tool], r = t.d / 2, pts = nibblePoints(h), n = pts.length, TAU = 2 * Math.PI;
+  const arcs = [];
+  for (let i = 0; i < n; i++) {
+    const [x, y] = pts[i];
+    const cov = [];  // ほかの丸に隠れる角度の範囲
+    // 円周上で近い順に見て、重ならなくなったら止める
+    for (let k = 1; k <= n >> 1; k++) {
+      let near = false;
+      for (const j of new Set([(i + k) % n, (i - k + n) % n])) {
+        const dx = pts[j][0] - x, dy = pts[j][1] - y, d = Math.sqrt(dx * dx + dy * dy);
+        if (d >= 2 * r) continue;
+        near = true;
+        if (d < 1e-9) { if (j < i) cov.push([0, TAU]); continue; }
+        const th = Math.atan2(dy, dx), hw = Math.acos(d / (2 * r));
+        const a = ((th - hw) % TAU + TAU) % TAU, b = a + 2 * hw;
+        if (b > TAU) cov.push([a, TAU], [0, b - TAU]); else cov.push([a, b]);
+      }
+      if (!near) break;
+    }
+    cov.sort((p, q) => p[0] - q[0]);
+    let cur = 0;
+    for (const [a, b] of cov) { if (a > cur + 1e-9) arcs.push({ x, y, a0: cur, a1: a }); cur = Math.max(cur, b); }
+    if (cur < TAU - 1e-9) arcs.push({ x, y, a0: cur, a1: TAU });
+  }
+  return { r, arcs };
+}
 // 長方形の金型（番号）のうち、w × h の長方形に入るいちばん大きいもの
 function pickRectTool(w, h) {
   let best = null;
@@ -1962,7 +1991,18 @@ function drawLayout() {
           const [px, py] = toScreen(q.x0, q.y1), [qx, qy] = toScreen(q.x1, q.y0);
           ctx.strokeRect(px, py, qx - px, qy - py);
         }
-      } else if (round1 || nib) {
+      } else if (nib) {
+        // 追い抜き: 実際に抜く形の縁（外側と内側）を点線で描く
+        const { r, arcs } = nibbleArcs(h);
+        const rs = r * view.scale;
+        ctx.beginPath();
+        for (const q of arcs) {
+          const [sx, sy] = toScreen(q.x, q.y);
+          ctx.moveTo(sx + rs * Math.cos(-q.a1), sy + rs * Math.sin(-q.a1));
+          ctx.arc(sx, sy, rs, -q.a1, -q.a0);  // 画面は Y が下向きなので角度の向きが逆
+        }
+        ctx.stroke();
+      } else if (round1) {
         ctx.beginPath(); ctx.arc((ax + bx) / 2, (ay + by) / 2, (bx - ax) / 2, 0, Math.PI * 2); ctx.stroke();
       } else {
         ctx.strokeRect(ax, ay, bx - ax, by - ay);

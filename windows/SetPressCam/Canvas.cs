@@ -566,7 +566,18 @@ namespace SetPressCam
                                 var qr = ScreenRect(q.X0, q.Y0, q.X1, q.Y1);
                                 g.DrawRectangle(p, qr.X, qr.Y, qr.Width, qr.Height);
                             }
-                        else if (round1 || nib) g.DrawEllipse(p, r.X, r.Y, r.Width, r.Height);
+                        else if (nib)
+                        {
+                            // 追い抜き: 実際に抜く形の縁（外側と内側）を点線で描く。画面は Y が下向きなので角度の向きが逆
+                            double dr;
+                            foreach (var q in ed.NibbleArcs(h, out dr))
+                            {
+                                var sc = ToScreen(q[0], q[1]); float rs = (float)(dr * Scale);
+                                float sweep = (float)((q[3] - q[2]) * 180 / Math.PI);
+                                if (rs > 0 && sweep > 0.01f) g.DrawArc(p, sc.X - rs, sc.Y - rs, 2 * rs, 2 * rs, (float)(-q[3] * 180 / Math.PI), sweep);
+                            }
+                        }
+                        else if (round1) g.DrawEllipse(p, r.X, r.Y, r.Width, r.Height);
                         else g.DrawRectangle(p, r.X, r.Y, r.Width, r.Height);
                     }
                     var t = h.Tool == null ? null : ed.Doc.Tools[h.Tool.Value];

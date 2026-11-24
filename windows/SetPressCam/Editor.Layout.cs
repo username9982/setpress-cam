@@ -237,6 +237,44 @@ namespace SetPressCam
             return output;
         }
 
+        /// <summary>追い抜きで実際に抜く形の縁（金型の丸を重ねた形の、外側と内側の縁）。金型の丸ごとに、ほかの丸に隠れない弧
+        /// （中心 X・Y、角度 A0〜A1。角度は Y を上へ正にした反時計回り、0〜2π）</summary>
+        public List<double[]> NibbleArcs(Hit h, out double r)
+        {
+            var t = Doc.Tools[h.Tool.Value];
+            r = (t.D ?? 0) / 2;
+            var pts = NibblePoints(h);
+            int n = pts.Count;
+            const double TAU = 2 * Math.PI;
+            var arcs = new List<double[]>();
+            for (int i = 0; i < n; i++)
+            {
+                double x = pts[i].X, y = pts[i].Y;
+                var cov = new List<double[]>();  // ほかの丸に隠れる角度の範囲
+                // 円周上で近い順に見て、重ならなくなったら止める
+                for (int k = 1; k <= n / 2; k++)
+                {
+                    bool near = false;
+                    foreach (int j in new HashSet<int> { (i + k) % n, (i - k + n) % n })
+                    {
+                        double dx = pts[j].X - x, dy = pts[j].Y - y, d = Math.Sqrt(dx * dx + dy * dy);
+                        if (d >= 2 * r) continue;
+                        near = true;
+                        if (d < 1e-9) { if (j < i) cov.Add(new[] { 0, TAU }); continue; }
+                        double th = Math.Atan2(dy, dx), hw = Math.Acos(d / (2 * r));
+                        double a = ((th - hw) % TAU + TAU) % TAU, b = a + 2 * hw;
+                        if (b > TAU) { cov.Add(new[] { a, TAU }); cov.Add(new[] { 0, b - TAU }); } else cov.Add(new[] { a, b });
+                    }
+                    if (!near) break;
+                }
+                cov.Sort((p, q) => p[0].CompareTo(q[0]));
+                double cur = 0;
+                foreach (var c in cov) { if (c[0] > cur + 1e-9) arcs.Add(new[] { x, y, cur, c[0] }); cur = Math.Max(cur, c[1]); }
+                if (cur < TAU - 1e-9) arcs.Add(new[] { x, y, cur, TAU });
+            }
+            return arcs;
+        }
+
         /// <summary>長方形の金型（番号）のうち、w × h の長方形に入るいちばん大きいもの</summary>
         public int? PickRectTool(double w, double h)
         {
