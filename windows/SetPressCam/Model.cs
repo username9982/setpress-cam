@@ -77,9 +77,10 @@ namespace SetPressCam
         public double Y0 { get; set; }
         public double X1 { get; set; }
         public double Y1 { get; set; }
-        public string Macro { get; set; }  // null は F3、"F13"、"単発"
+        public string Macro { get; set; }  // null は F3、"F13"、"単発"、"F5"（丸の追い抜き）
         public string Kind { get; set; }   // "notch"（切り欠き）
         public double? Mj { get; set; }    // F13 のミクロジョイント
+        public double? Pitch { get; set; } // F5 のピッチ（抜くときの円同士の直線距離）
         public Hit Clone() { return (Hit)MemberwiseClone(); }
     }
 
@@ -337,6 +338,12 @@ namespace SetPressCam
                         hit.Mj = Finite(mj) && mj > 0 ? mj : 0;
                     }
                     if (macro == "単発") hit.Macro = "単発";
+                    if (macro == "F5")
+                    {
+                        hit.Macro = "F5";
+                        double pt = Js.R3(Num(h["pitch"]));
+                        hit.Pitch = Finite(pt) && pt > 0 ? pt : 3.2;
+                    }
                     if (Str(h["kind"]) == "notch") hit.Kind = "notch";
                     if (new[] { hit.X0, hit.Y0, hit.X1, hit.Y1 }.All(Finite)) hits.Add(hit);
                 }

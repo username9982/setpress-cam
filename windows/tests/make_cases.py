@@ -117,6 +117,21 @@ def cases():
     d.circle(380, 120, 20)
     d.circle(600, 200, 8)
     out.append(d)
+    # 11: 丸の追い抜き（F5）。板厚 6: ピッチは 2 倍の 12 を 10 に抑える。φ20 は φ12 だと半径の差 4 が板厚より小さいので φ8 で抜く
+    d = Doc('nibble', [{'shape': 'round', 'w': None, 'h': None, 'd': 12, 'note': ''}, ROUND, rect_tool(20, 10)])
+    d.d['sheet']['t'] = 6
+    d.rect(100, 100, 400, 300)
+    d.circle(200, 200, 100)
+    d.circle(330, 250, 20)
+    d.circle(330, 150, 12)
+    d.circle(360, 150, 9)
+    out.append(d)
+    # 12: 板厚 12（10 mm を超えるので追い抜きできない）
+    d = Doc('nibble-thick', [{'shape': 'round', 'w': None, 'h': None, 'd': 12, 'note': ''}, NONE, NONE])
+    d.d['sheet']['t'] = 12
+    d.rect(100, 100, 300, 300)
+    d.circle(200, 200, 60)
+    out.append(d)
     # 9: 金型なし
     d = Doc('no-tools', [ROUND, NONE, NONE])
     d.rect(100, 100, 200, 200)

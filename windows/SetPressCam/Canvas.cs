@@ -545,7 +545,7 @@ namespace SetPressCam
                     var h = hs[i];
                     var r = ScreenRect(h.X0, h.Y0, h.X1, h.Y1);
                     var col = h.Tool == null ? COLOR.Missing : COLOR.Layout;
-                    bool round1 = ed.RoundHit(h);
+                    bool round1 = ed.RoundHit(h), nib = ed.NibbleHit(h);
                     using (var p = new Pen(col, 1.5f) { DashPattern = new[] { 5 / 1.5f, 3 / 1.5f } })
                     {
                         if (Editor.MacroOf(h) == "F13" && (h.Mj ?? 0) != 0)
@@ -554,7 +554,7 @@ namespace SetPressCam
                                 var qr = ScreenRect(q.X0, q.Y0, q.X1, q.Y1);
                                 g.DrawRectangle(p, qr.X, qr.Y, qr.Width, qr.Height);
                             }
-                        else if (round1) g.DrawEllipse(p, r.X, r.Y, r.Width, r.Height);
+                        else if (round1 || nib) g.DrawEllipse(p, r.X, r.Y, r.Width, r.Height);
                         else g.DrawRectangle(p, r.X, r.Y, r.Width, r.Height);
                     }
                     var t = h.Tool == null ? null : ed.Doc.Tools[h.Tool.Value];
@@ -563,10 +563,21 @@ namespace SetPressCam
                         float rr = (float)(t.D.Value / 2 * Scale), cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
                         using (var b = new SolidBrush(Color.FromArgb(71, 31, 138, 76))) g.FillEllipse(b, cx - rr, cy - rr, 2 * rr, 2 * rr);
                     }
-                    else if (t != null && t.W != null && t.H != null)
+                    else if (nib)
+                    {
+                        // 追い抜き: ピッチごとに金型が抜く丸を、まとめて 1 つの形として塗る
+                        float rr = (float)(t.D.Value / 2 * Scale);
+                        using (var path = new GraphicsPath(FillMode.Winding))
+                        using (var b = new SolidBrush(Color.FromArgb(71, 31, 138, 76)))
+                        {
+                            foreach (var q in ed.NibblePoints(h)) { var s = ToScreen(q.X, q.Y); path.AddEllipse(s.X - rr, s.Y - rr, 2 * rr, 2 * rr); }
+                            g.FillPath(b, path);
+                        }
+                    }
+                    else if (t != null && t.Shape == "rect" && t.W != null && t.H != null)
                         using (var b = new SolidBrush(Color.FromArgb(71, 31, 138, 76))) g.FillRectangle(b, r.X, r.Y, (float)(t.W.Value * Scale), (float)(t.H.Value * Scale));
                     using (var b = new SolidBrush(col))
-                        g.DrawString(Editor.MacroOf(h) == "F13" ? (i + 1) + " F13" : (i + 1).ToString(), F12B, b, r.X + 3, r.Y + 2, TYPO);
+                        g.DrawString(Editor.MacroOf(h) == "F13" || Editor.MacroOf(h) == "F5" ? (i + 1) + " " + Editor.MacroOf(h) : (i + 1).ToString(), F12B, b, r.X + 3, r.Y + 2, TYPO);
                 }
             }
             // ハイライト: 選んだ 1 回で抜く範囲
@@ -592,7 +603,7 @@ namespace SetPressCam
                                     g.DrawRectangle(p, qr.X, qr.Y, qr.Width, qr.Height);
                                 }
                         }
-                        else if (ed.RoundHit(h))
+                        else if (ed.CircleHit(h))
                         {
                             g.FillEllipse(fill, r);
                             using (var p = new Pen(COLOR.Selected, 3)) g.DrawEllipse(p, r.X, r.Y, r.Width, r.Height);

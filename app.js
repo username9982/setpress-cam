@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.18.0';
+const APP_VERSION = '0.19.0';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1509,6 +1509,34 @@ function pickRoundTool(d) {
 }
 // 丸の金型で抜いた単発か
 const roundHit = (h) => macroOf(h) === '単発' && h.tool != null && doc.tools[h.tool] && doc.tools[h.tool].shape === 'round';
+// 丸の追い抜き（F5）の板厚。未設定なら 1.6 mm
+const nibbleT = () => doc.sheet.t || 1.6;
+// 直径 d の丸を追い抜き（F5）で抜く金型とピッチ {tool, pitch}。なければ null。
+// d より小さい丸の金型のうち大きいものから選ぶ。ピッチ（抜くときの円同士の直線距離）は板厚の 2 倍を目安に、
+// 板厚以上 10 mm 以下で、金型の中心が通る円の半径を超えないようにする（入らなければ、もっと小さい金型にする）
+function pickNibble(d) {
+  const t = nibbleT();
+  if (t > 10) return null;
+  const cands = doc.tools.map((q, i) => ({ q, i }))
+    .filter(({ q }) => q.shape === 'round' && q.d && q.d < d - 1e-6)
+    .sort((a, b) => b.q.d - a.q.d || a.i - b.i);
+  for (const { q, i } of cands) {
+    const pitch = round(Math.min(2 * t, 10, (d - q.d) / 2));
+    if (pitch >= t - 1e-9) return { tool: i, pitch };
+  }
+  return null;
+}
+// 丸穴を抜く割付（単発か追い抜き）か
+const nibbleHit = (h) => macroOf(h) === 'F5' && h.tool != null && doc.tools[h.tool] && doc.tools[h.tool].shape === 'round';
+const circleHit = (h) => roundHit(h) || nibbleHit(h);
+// 追い抜きで金型が抜く位置（金型の中心）。ピッチごとに円周上に並べる（描くため。機械と同じ並びとはかぎらない）
+function nibblePoints(h) {
+  const t = doc.tools[h.tool];
+  const cx = (h.x0 + h.x1) / 2, cy = (h.y0 + h.y1) / 2, rho = (h.x1 - h.x0 - t.d) / 2;
+  if (!(rho > 0) || !(h.pitch > 0)) return [];
+  const n = Math.min(2000, Math.max(3, Math.ceil(Math.PI / Math.asin(Math.min(1, h.pitch / (2 * rho))))));
+  return Array.from({ length: n }, (v, i) => [cx + rho * Math.cos(2 * Math.PI * i / n), cy + rho * Math.sin(2 * Math.PI * i / n)]);
+}
 // 長方形の金型（番号）のうち、w × h の長方形に入るいちばん大きいもの
 function pickRectTool(w, h) {
   let best = null;
@@ -1618,17 +1646,23 @@ function autoLayout() {
   });
   // 上から下、左から右の順に抜く
   hits.sort((p, q) => q.y1 - p.y1 || p.x0 - q.x0);
-  // 丸穴: 同じ直径の丸の金型で、中心を単発で 1 回抜く。金型ごとにまとめ（金型を替える回数を減らす）、上から下、左から右の順。
-  // 合う金型がない丸は抜かない（大きい丸の追い抜きはまだできない）
-  const circ = circlesOf(k).map((c) => ({ c, p: P(c.c), tool: pickRoundTool(c.d) }));
+  // 丸穴: 同じ直径の丸の金型があれば、中心を単発で 1 回抜く。なければ、小さい丸の金型で追い抜き（F5）する。
+  // 金型ごとにまとめ（金型を替える回数を減らす）、上から下、左から右の順。どちらもできない丸は抜かない
+  const circ = circlesOf(k).map((c) => {
+    const tool = pickRoundTool(c.d);
+    const nib = tool == null ? pickNibble(c.d) : null;
+    return { c, p: P(c.c), tool: tool != null ? tool : nib ? nib.tool : null, pitch: nib ? nib.pitch : null };
+  });
   const missing = new Map();
   for (const q of circ) if (q.tool == null) missing.set(q.c.d, (missing.get(q.c.d) || 0) + 1);
-  for (const [d, n] of missing) warn.push(`丸穴 φ${fmt(d)}（${n} 個）に合う丸の金型がないので、抜いていません。「金型」で φ${fmt(d)} の丸を決めてください。`);
+  for (const [d, n] of missing) warn.push(nibbleT() > 10
+    ? `丸穴 φ${fmt(d)}（${n} 個）に合う丸の金型がなく、板厚が 10 mm を超えるので追い抜きもできません。抜いていません。`
+    : `丸穴 φ${fmt(d)}（${n} 個）に合う丸の金型も、追い抜きできる小さい丸の金型もないので、抜いていません。「金型」で丸の金型を決めてください。`);
   circ.filter((q) => q.tool != null)
     .sort((a, b) => a.tool - b.tool || b.p.y - a.p.y || a.p.x - b.p.x)
-    .forEach(({ c, p, tool }) => {
+    .forEach(({ c, p, tool, pitch }) => {
       const r = c.d / 2;
-      hits.push({ tool, x0: round(p.x - r), y0: round(p.y - r), x1: round(p.x + r), y1: round(p.y + r), macro: '単発' });
+      hits.push({ tool, x0: round(p.x - r), y0: round(p.y - r), x1: round(p.x + r), y1: round(p.y + r), ...(pitch != null ? { macro: 'F5', pitch } : { macro: '単発' }) });
     });
   // 切り欠き: 外形と重なる所を、単発（金型とちょうど同じ大きさ）か F3 で抜く。ほかのワークにぶつからなければ、
   // 外形の辺の外へ広げて四角く抜き、あとから抜く F13 に金型寸法の約 1/3 かぶるようにする
@@ -1819,7 +1853,7 @@ function updateLayoutPanel() {
     summary = `穴 ${holes.length} 個` + (nc ? `・丸穴 ${nc} 個` : '') + (nn ? `・切り欠き ${nn} 個` : '');
     if (lay) {
       const count = (m) => lay.hits.filter((h) => macroOf(h) === m).length;
-      summary += `\nF3 ${count('F3')} 回` + (count('単発') ? `\n単発 ${count('単発')} 回` : '') + (count('F13') ? `\nF13 ${count('F13')} 回（外形）` : '');
+      summary += `\nF3 ${count('F3')} 回` + (count('単発') ? `\n単発 ${count('単発')} 回` : '') + (count('F5') ? `\nF5 ${count('F5')} 回（丸の追い抜き）` : '') + (count('F13') ? `\nF13 ${count('F13')} 回（外形）` : '');
       const used = [...new Set(lay.hits.map((h) => h.tool).filter((t) => t != null))];
       if (used.length) summary += `\n金型 ${used.map((t) => `T${t + 1} ${toolText(doc.tools[t])}`).join('、')}`;
       warn.push(...lay.warn);
@@ -1863,13 +1897,14 @@ function drawLayout() {
       ctx.lineWidth = 1.5;
       ctx.setLineDash([5, 3]);
       const round1 = roundHit(h);
+      const nib = nibbleHit(h);
       if (macroOf(h) === 'F13' && h.mj) {
         // ミクロジョイントで角が残るので、抜く帯と単発の形で描く
         for (const q of [...f13Strips(h), ...f13Singles(h)]) {
           const [px, py] = toScreen(q.x0, q.y1), [qx, qy] = toScreen(q.x1, q.y0);
           ctx.strokeRect(px, py, qx - px, qy - py);
         }
-      } else if (round1) {
+      } else if (round1 || nib) {
         ctx.beginPath(); ctx.arc((ax + bx) / 2, (ay + by) / 2, (bx - ax) / 2, 0, Math.PI * 2); ctx.stroke();
       } else {
         ctx.strokeRect(ax, ay, bx - ax, by - ay);
@@ -1879,14 +1914,24 @@ function drawLayout() {
       if (round1) {
         ctx.fillStyle = 'rgba(31, 138, 76, 0.28)';
         ctx.beginPath(); ctx.arc((ax + bx) / 2, (ay + by) / 2, t.d / 2 * view.scale, 0, Math.PI * 2); ctx.fill();
-      } else if (t) {
+      } else if (nib) {
+        // 追い抜き: ピッチごとに金型が抜く丸を、まとめて 1 つの形として塗る
+        ctx.fillStyle = 'rgba(31, 138, 76, 0.28)';
+        ctx.beginPath();
+        for (const [x, y] of nibblePoints(h)) {
+          const [sx, sy] = toScreen(x, y), r = t.d / 2 * view.scale;
+          ctx.moveTo(sx + r, sy);
+          ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        }
+        ctx.fill();
+      } else if (t && t.shape === 'rect') {
         ctx.fillStyle = 'rgba(31, 138, 76, 0.28)';
         ctx.fillRect(ax, ay, t.w * view.scale, t.h * view.scale);
       }
       ctx.fillStyle = col;
       ctx.font = 'bold 12px sans-serif';
       ctx.textBaseline = 'top';
-      ctx.fillText(macroOf(h) === 'F13' ? `${i + 1} F13` : `${i + 1}`, ax + 3, ay + 2);
+      ctx.fillText(macroOf(h) === 'F13' || macroOf(h) === 'F5' ? `${i + 1} ${macroOf(h)}` : `${i + 1}`, ax + 3, ay + 2);
       ctx.restore();
     });
   }
@@ -1910,7 +1955,7 @@ function drawLayout() {
       ctx.fill();
       ctx.lineWidth = 2;
       ctx.stroke();
-    } else if (roundHit(h)) {
+    } else if (circleHit(h)) {
       ctx.beginPath(); ctx.arc((ax + bx) / 2, (ay + by) / 2, (bx - ax) / 2, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
@@ -1989,6 +2034,7 @@ function parseCode(text) {
   const NUM = '(-?\\d+(?:\\.\\d+)?|-?\\.\\d+)';
   const reXY = new RegExp(`^X${NUM}Y${NUM}$`);
   const reR = new RegExp(`^R${NUM}$`);
+  const reN = new RegExp(`^${NUM}$`);
   let program;           // O の行がなければ undefined（変えない）
   let tool = null;       // いまの T（0 から）
   let mac = null;        // 書いている途中のマクロ {no, hits, line}
@@ -2036,6 +2082,21 @@ function parseCode(text) {
     }
     if (e.mac) e.mac.hits.push(h);
   };
+  // F5（丸の追い抜き）: 中心 XY → 直径 → ピッチ → 金型直径 → 板厚
+  const finishF5 = (e) => {
+    const [ctr, d, pitch, td, th] = e.vals;
+    if (e.tool == null) { err(e.line, 'T で金型を選んでから書いてください'); return; }
+    const q = doc.tools[e.tool];
+    if (!q || q.shape !== 'round' || !q.d) { err(e.line, `T${e.tool + 1} は丸の金型ではありません`); return; }
+    if (!nearC(q.d, td)) { err(e.line, `金型直径 ${fmt(td)} が T${e.tool + 1}（${toolText(q)}）と合いません`); return; }
+    if (!(d > q.d + 1e-6)) { err(e.line, `直径は金型直径 ${fmt(q.d)} より大きくしてください`); return; }
+    const t = nibbleT();
+    if (!nearC(th, t)) { err(e.line, `板厚 ${fmt(th)} が図面の板厚 ${fmt(t)}${doc.sheet.t ? '' : '（未設定なので 1.6）'} と合いません（板厚は上の「t」で決めてください）`); return; }
+    if (pitch < t - 1e-9 || pitch > 10 + 1e-9) { err(e.line, `ピッチは板厚 ${fmt(t)} 以上 10 以下にしてください`); return; }
+    if (pitch > (d - q.d) / 2 + 1e-9) { err(e.line, `ピッチは ${fmt(round((d - q.d) / 2))}（直径と金型直径の差の半分）以下にしてください`); return; }
+    const cx = ctr[0], cy = -ctr[1];
+    if (e.mac) e.mac.hits.push({ tool: e.tool, x0: cx - d / 2, y0: cy - d / 2, x1: cx + d / 2, y1: cy + d / 2, macro: 'F5', pitch });
+  };
   const finishF23 = (f) => {
     const [no, org, pitch, cnt] = f.vals;
     if (!macros.has(no)) { err(f.line, `マクロ ${no}（F${no}）がありません`); return; }
@@ -2052,6 +2113,18 @@ function parseCode(text) {
     if (!body) return;
     const c = body.replace(/ /g, '');
     let m;
+    if (exp && exp.macro === 'F5') {
+      const step = exp.vals.length;
+      if (step === 0) {
+        if (!(m = c.match(reXY))) { err(line, '中心の X Y を書いてください（例: X50 Y20）'); exp = null; return; }
+        exp.vals.push([Number(m[1]), Number(m[2])]);
+      } else {
+        if (!(m = c.match(reN))) { err(line, `${['直径', 'ピッチ', '金型直径', '板厚'][step - 1]}を数字で書いてください`); exp = null; return; }
+        exp.vals.push(Number(m[1]));
+      }
+      if (exp.vals.length === 5) { finishF5(exp); exp = null; }
+      return;
+    }
     if (exp) {
       const step = exp.vals.length;
       if (exp.macro === 'F13' && step === 3) {
@@ -2102,6 +2175,9 @@ function parseCode(text) {
       if (f === 3 || f === 13) {
         if (!mac) err(line, `F${f} は F100〜F110 の中に書いてください`);
         exp = { macro: f === 13 ? 'F13' : 'F3', line, vals: [], tool, mac };
+      } else if (f === 5) {
+        if (!mac) err(line, 'F5 は F100〜F110 の中に書いてください');
+        exp = { macro: 'F5', line, vals: [], tool, mac };
       } else if (f >= 100 && f <= 109) {
         if (mac) err(line, `F110 でマクロ ${mac.no} を閉じてから書いてください`);
         else if (macros.has(f)) err(line, `マクロ ${f} が 2 回あります`);
@@ -2112,7 +2188,7 @@ function parseCode(text) {
       } else if (f === 23) {
         if (mac) err(line, 'F23 は F110 のあとに書いてください');
         f23 = { line, vals: [] };
-      } else err(line, `F${f} はここでは使えません（F3・F13・F23・F100〜F110）`);
+      } else err(line, `F${f} はここでは使えません（F3・F5・F13・F23・F100〜F110）`);
     } else if ((m = c.match(reXY))) {
       // マクロの中の X Y だけの行は単発（金型の中心）
       if (!mac) { err(line, '単発（X Y）は F100〜F110 の中に書いてください'); return; }
@@ -2153,7 +2229,8 @@ function planCode(text) {
   }
   if (r.errs.length) return { errs: r.errs.sort((a, b) => a.line - b.line) };
   const sameHit = (a, b) => macroOf(a) === macroOf(b) && a.tool === b.tool && nearC(a.x0, b.x0) && nearC(a.y0, b.y0)
-    && nearC(a.x1, b.x1) && nearC(a.y1, b.y1) && (a.tool == null || macroOf(a) !== 'F13' || nearC(a.mj || 0, b.mj || 0));
+    && nearC(a.x1, b.x1) && nearC(a.y1, b.y1) && (a.tool == null || macroOf(a) !== 'F13' || nearC(a.mj || 0, b.mj || 0))
+    && (macroOf(a) !== 'F5' || nearC(a.pitch, b.pitch));
   const plans = [];
   info.outers.forEach((fr, k) => {
     const old = layoutOf(k);
@@ -2170,6 +2247,7 @@ function planCode(text) {
         const h = { tool: q.tool, x0: round(q.x0 + o.x), y0: round(q.y0 + o.y), x1: round(q.x1 + o.x), y1: round(q.y1 + o.y) };
         if (q.macro) h.macro = q.macro;
         if (q.macro === 'F13') h.mj = q.mj;
+        if (q.macro === 'F5') h.pitch = round(q.pitch);
         const was = oldHits.find((x) => sameHit(x, h));
         if (was && was.kind) h.kind = was.kind;  // 切り欠きの印は、同じ所を抜くものに残す
         hits.push(h);
@@ -2235,10 +2313,10 @@ function genCode() {
     add('', null);
     add(`; S${k + 1} 割付  T → F100〜F110 でマクロに登録 → F23 で配置。F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法`, null, true);
     if (lay.src !== holeSrc(k)) add('; ※ 割付のあとで図形が変わりました。もう一度自動割付してください', null, true);
-    // 合う丸の金型がなくて抜いていない丸穴
-    const unpunched = circlesOf(k).filter((c) => { const p = P(c.c); return !hs.some((h) => roundHit(h) && nearC(doc.tools[h.tool].d, c.d) && nearC((h.x0 + h.x1) / 2, p.x) && nearC((h.y0 + h.y1) / 2, p.y)); });
+    // 抜ける丸の金型がなくて抜いていない丸穴
+    const unpunched = circlesOf(k).filter((c) => { const p = P(c.c); return !hs.some((h) => circleHit(h) && nearC(h.x1 - h.x0, c.d) && nearC((h.x0 + h.x1) / 2, p.x) && nearC((h.y0 + h.y1) / 2, p.y)); });
     for (const d of [...new Set(unpunched.map((c) => c.d))])
-      add(`; ※ 丸穴 φ${fmt(d)}（${unpunched.filter((c) => c.d === d).length} 個）は、合う丸の金型がないので抜いていません`, null, true);
+      add(`; ※ 丸穴 φ${fmt(d)}（${unpunched.filter((c) => c.d === d).length} 個）は、抜ける丸の金型がないので抜いていません`, null, true);
     if (!hs.length) { add('; 抜く所がありません', null, true); continue; }
     // F23 のピッチ（書き換えていなければ 金型が抜く形を囲む四角 + 10 mm）と列数
     const f = f23Of(lay);
@@ -2268,6 +2346,17 @@ function genCode() {
         const hk = hitKey(lay.work, i);  // この F3 のまとまりの行をタップすると、抜く範囲をハイライトする
         const f13 = macroOf(h) === 'F13';
         const single = macroOf(h) === '単発';
+        if (macroOf(h) === 'F5') {
+          madd(`; ${i + 1}  丸穴 φ${fmt(round(h.x1 - h.x0))}  F5 追い抜き: 中心 XY → 直径 → ピッチ（円同士の直線距離）→ 金型直径 → 板厚`, hk, true);
+          madd('F5', hk);
+          add(mxy((h.x0 + h.x1) / 2 - o.x, o.y - (h.y0 + h.y1) / 2, '中心'), hk);
+          const nl = (v, note) => add(`    ${fmt(v).padEnd(16)}; ${note}`, hk);
+          nl(round(h.x1 - h.x0), '直径');
+          nl(h.pitch, 'ピッチ');
+          nl(t ? t.d : 0, '金型直径');
+          nl(nibbleT(), doc.sheet.t ? '板厚' : '板厚（未設定なので 1.6）');
+          continue;
+        }
         madd(f13 ? `; ${i + 1} 外形  F13: 開始点（左上）→ 外形 XY → 金型 XY → 角 R（金型寸法のぶん外側）`
           : `; ${i + 1}${h.kind === 'notch' ? ' 切り欠き' : ''}${roundHit(h) ? `  丸穴 φ${fmt(t.d)}` : ''}${single ? '  単発: 金型の中心' : ''}`, hk, true);
         if (f13) {
@@ -2562,6 +2651,7 @@ function loadDoc(d) {
         tool: Number.isInteger(h.tool) ? h.tool : null, x0: num(h.x0), y0: num(h.y0), x1: num(h.x1), y1: num(h.y1),
         ...(h.macro === 'F13' ? { macro: 'F13', mj: Number.isFinite(num(h.mj)) && num(h.mj) > 0 ? num(h.mj) : 0 } : {}),
         ...(h.macro === '単発' ? { macro: '単発' } : {}),
+        ...(h.macro === 'F5' ? { macro: 'F5', pitch: Number.isFinite(num(h.pitch)) && num(h.pitch) > 0 ? num(h.pitch) : 3.2 } : {}),
         ...(h.kind === 'notch' ? { kind: 'notch' } : {}),
       })).filter((h) => [h.x0, h.y0, h.x1, h.y1].every(Number.isFinite)),
       warn: (Array.isArray(q.warn) ? q.warn : []).map(String),

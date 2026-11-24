@@ -158,6 +158,53 @@ namespace SetPressCam
             return Doc.Tools[h.Tool.Value].Shape == "round";
         }
 
+        /// <summary>丸の追い抜き（F5）の板厚。未設定なら 1.6 mm</summary>
+        public double NibbleT() { return Doc.Sheet.T ?? 1.6; }
+
+        /// <summary>直径 d の丸を追い抜き（F5）で抜く金型とピッチ。なければ null。
+        /// d より小さい丸の金型のうち大きいものから選ぶ。ピッチ（抜くときの円同士の直線距離）は板厚の 2 倍を目安に、
+        /// 板厚以上 10 mm 以下で、金型の中心が通る円の半径を超えないようにする（入らなければ、もっと小さい金型にする）</summary>
+        public Tuple<int, double> PickNibble(double d)
+        {
+            double t = NibbleT();
+            if (t > 10) return null;
+            var cands = new List<int>();
+            for (int i = 0; i < Doc.Tools.Count; i++)
+            {
+                var q = Doc.Tools[i];
+                if (q.Shape == "round" && (q.D ?? 0) != 0 && q.D.Value < d - 1e-6) cands.Add(i);
+            }
+            Js.Sort(cands, (a, b) => Doc.Tools[a].D.Value != Doc.Tools[b].D.Value ? Js.Cmp(Doc.Tools[b].D.Value - Doc.Tools[a].D.Value) : a - b);
+            foreach (int i in cands)
+            {
+                double pitch = Round(Math.Min(Math.Min(2 * t, 10), (d - Doc.Tools[i].D.Value) / 2));
+                if (pitch >= t - 1e-9) return Tuple.Create(i, pitch);
+            }
+            return null;
+        }
+
+        /// <summary>丸の金型で追い抜き（F5）する割付か</summary>
+        public bool NibbleHit(Hit h)
+        {
+            if (MacroOf(h) != "F5" || h.Tool == null || h.Tool.Value < 0 || h.Tool.Value >= Doc.Tools.Count) return false;
+            return Doc.Tools[h.Tool.Value].Shape == "round";
+        }
+
+        /// <summary>丸穴を抜く割付（単発か追い抜き）か</summary>
+        public bool CircleHit(Hit h) { return RoundHit(h) || NibbleHit(h); }
+
+        /// <summary>追い抜きで金型が抜く位置（金型の中心）。ピッチごとに円周上に並べる（描くため。機械と同じ並びとはかぎらない）</summary>
+        public List<V> NibblePoints(Hit h)
+        {
+            var output = new List<V>();
+            var t = Doc.Tools[h.Tool.Value];
+            double cx = (h.X0 + h.X1) / 2, cy = (h.Y0 + h.Y1) / 2, rho = (h.X1 - h.X0 - (t.D ?? 0)) / 2, pitch = h.Pitch ?? 0;
+            if (!(rho > 0) || !(pitch > 0)) return output;
+            int n = (int)Math.Min(2000, Math.Max(3, Math.Ceiling(Math.PI / Math.Asin(Math.Min(1, pitch / (2 * rho))))));
+            for (int i = 0; i < n; i++) output.Add(new V(cx + rho * Math.Cos(2 * Math.PI * i / n), cy + rho * Math.Sin(2 * Math.PI * i / n)));
+            return output;
+        }
+
         /// <summary>長方形の金型（番号）のうち、w × h の長方形に入るいちばん大きいもの</summary>
         public int? PickRectTool(double w, double h)
         {
@@ -307,9 +354,14 @@ namespace SetPressCam
             // 上から下、左から右の順に抜く
             Comparison<Hit> order = (p, q) => q.Y1 != p.Y1 ? Js.Cmp(q.Y1 - p.Y1) : Js.Cmp(p.X0 - q.X0);
             Js.Sort(hits, order);
-            // 丸穴: 同じ直径の丸の金型で、中心を単発で 1 回抜く。金型ごとにまとめ（金型を替える回数を減らす）、上から下、左から右の順。
-            // 合う金型がない丸は抜かない（大きい丸の追い抜きはまだできない）
-            var circ = CirclesOf(k).Select(c => new { c, p = P(c.C), tool = PickRoundTool(c.D) }).ToList();
+            // 丸穴: 同じ直径の丸の金型があれば、中心を単発で 1 回抜く。なければ、小さい丸の金型で追い抜き（F5）する。
+            // 金型ごとにまとめ（金型を替える回数を減らす）、上から下、左から右の順。どちらもできない丸は抜かない
+            var circ = CirclesOf(k).Select(c =>
+            {
+                var rt = PickRoundTool(c.D);
+                var nib = rt == null ? PickNibble(c.D) : null;
+                return new { c, p = P(c.C), tool = rt ?? (nib != null ? nib.Item1 : (int?)null), pitch = nib != null ? nib.Item2 : (double?)null };
+            }).ToList();
             var missD = new List<double>();
             var missN = new Dictionary<double, int>();
             foreach (var q in circ)
@@ -318,13 +370,15 @@ namespace SetPressCam
                 if (!missN.ContainsKey(q.c.D)) { missN[q.c.D] = 0; missD.Add(q.c.D); }
                 missN[q.c.D]++;
             }
-            foreach (var dd in missD) warn.Add("丸穴 φ" + Fmt(dd) + "（" + missN[dd] + " 個）に合う丸の金型がないので、抜いていません。「金型」で φ" + Fmt(dd) + " の丸を決めてください。");
+            foreach (var dd in missD) warn.Add(NibbleT() > 10
+                ? "丸穴 φ" + Fmt(dd) + "（" + missN[dd] + " 個）に合う丸の金型がなく、板厚が 10 mm を超えるので追い抜きもできません。抜いていません。"
+                : "丸穴 φ" + Fmt(dd) + "（" + missN[dd] + " 個）に合う丸の金型も、追い抜きできる小さい丸の金型もないので、抜いていません。「金型」で丸の金型を決めてください。");
             var cHits = circ.Where(q => q.tool != null).ToList();
             Js.Sort(cHits, (a, b) => a.tool != b.tool ? a.tool.Value - b.tool.Value : a.p.Y != b.p.Y ? Js.Cmp(b.p.Y - a.p.Y) : Js.Cmp(a.p.X - b.p.X));
             foreach (var q in cHits)
             {
                 double r = q.c.D / 2;
-                hits.Add(new Hit { Tool = q.tool, X0 = Round(q.p.X - r), Y0 = Round(q.p.Y - r), X1 = Round(q.p.X + r), Y1 = Round(q.p.Y + r), Macro = "単発" });
+                hits.Add(new Hit { Tool = q.tool, X0 = Round(q.p.X - r), Y0 = Round(q.p.Y - r), X1 = Round(q.p.X + r), Y1 = Round(q.p.Y + r), Macro = q.pitch != null ? "F5" : "単発", Pitch = q.pitch });
             }
             // 切り欠き: 外形と重なる所を、単発（金型とちょうど同じ大きさ）か F3 で抜く。ほかのワークにぶつからなければ、
             // 外形の辺の外へ広げて四角く抜き、あとから抜く F13 に金型寸法の約 1/3 かぶるようにする
@@ -526,7 +580,7 @@ namespace SetPressCam
             if (lay != null)
             {
                 Func<string, int> count = m => lay.Hits.Count(h => MacroOf(h) == m);
-                summary += "\r\nF3 " + count("F3") + " 回" + (count("単発") > 0 ? "\r\n単発 " + count("単発") + " 回" : "") + (count("F13") > 0 ? "\r\nF13 " + count("F13") + " 回（外形）" : "");
+                summary += "\r\nF3 " + count("F3") + " 回" + (count("単発") > 0 ? "\r\n単発 " + count("単発") + " 回" : "") + (count("F5") > 0 ? "\r\nF5 " + count("F5") + " 回（丸の追い抜き）" : "") + (count("F13") > 0 ? "\r\nF13 " + count("F13") + " 回（外形）" : "");
                 var used = lay.Hits.Where(h => h.Tool != null).Select(h => h.Tool.Value).Distinct().ToList();
                 if (used.Count > 0) summary += "\r\n金型 " + string.Join("、", used.Select(t => "T" + (t + 1) + " " + Model.ToolText(Doc.Tools[t])));
                 warn.AddRange(lay.Warn);
@@ -599,7 +653,7 @@ namespace SetPressCam
         const double CODE_EPS = 0.0015;  // コードの数は 0.001 mm に丸めてあるので、そのぶんは同じとみなす
         static bool NearC(double a, double b) { return Math.Abs(a - b) < CODE_EPS; }
 
-        class PHit { public int? Tool; public double X0, Y0, X1, Y1; public string Macro; public double Mj; }
+        class PHit { public int? Tool; public double X0, Y0, X1, Y1; public string Macro; public double Mj, Pitch; }
         class PMacro { public int No, Line; public List<PHit> Hits = new List<PHit>(); }
         class PPlace { public int No, K, Nx, Ny, Line; public double Px, Py; }
         class PExp { public string Macro; public int Line; public int? Tool; public PMacro Mac; public List<double[]> Vals = new List<double[]>(); }
@@ -616,6 +670,7 @@ namespace SetPressCam
         const string NUM = "(-?[0-9]+(?:\\.[0-9]+)?|-?\\.[0-9]+)";
         static readonly System.Text.RegularExpressions.Regex RE_XY = new System.Text.RegularExpressions.Regex("^X" + NUM + "Y" + NUM + "$");
         static readonly System.Text.RegularExpressions.Regex RE_R = new System.Text.RegularExpressions.Regex("^R" + NUM + "$");
+        static readonly System.Text.RegularExpressions.Regex RE_N = new System.Text.RegularExpressions.Regex("^" + NUM + "$");
         static double PNum(string s) { return double.Parse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture); }
 
         ParseResult ParseCode(string text)
@@ -675,6 +730,23 @@ namespace SetPressCam
                 }
                 if (e.Mac != null) e.Mac.Hits.Add(h);
             };
+            // F5（丸の追い抜き）: 中心 XY → 直径 → ピッチ → 金型直径 → 板厚
+            Action<PExp> finishF5 = e =>
+            {
+                double[] ctr = e.Vals[0];
+                double d = e.Vals[1][0], pitch = e.Vals[2][0], td = e.Vals[3][0], th = e.Vals[4][0];
+                if (e.Tool == null) { err(e.Line, "T で金型を選んでから書いてください"); return; }
+                var q = e.Tool.Value < Doc.Tools.Count ? Doc.Tools[e.Tool.Value] : null;
+                if (q == null || q.Shape != "round" || (q.D ?? 0) == 0) { err(e.Line, "T" + (e.Tool + 1) + " は丸の金型ではありません"); return; }
+                if (!NearC(q.D.Value, td)) { err(e.Line, "金型直径 " + Fmt(td) + " が T" + (e.Tool + 1) + "（" + Model.ToolText(q) + "）と合いません"); return; }
+                if (!(d > q.D.Value + 1e-6)) { err(e.Line, "直径は金型直径 " + Fmt(q.D.Value) + " より大きくしてください"); return; }
+                double t = NibbleT();
+                if (!NearC(th, t)) { err(e.Line, "板厚 " + Fmt(th) + " が図面の板厚 " + Fmt(t) + (Doc.Sheet.T != null ? "" : "（未設定なので 1.6）") + " と合いません（板厚は上の「t」で決めてください）"); return; }
+                if (pitch < t - 1e-9 || pitch > 10 + 1e-9) { err(e.Line, "ピッチは板厚 " + Fmt(t) + " 以上 10 以下にしてください"); return; }
+                if (pitch > (d - q.D.Value) / 2 + 1e-9) { err(e.Line, "ピッチは " + Fmt(Round((d - q.D.Value) / 2)) + "（直径と金型直径の差の半分）以下にしてください"); return; }
+                double cx = ctr[0], cy = -ctr[1];
+                if (e.Mac != null) e.Mac.Hits.Add(new PHit { Tool = e.Tool, X0 = cx - d / 2, Y0 = cy - d / 2, X1 = cx + d / 2, Y1 = cy + d / 2, Macro = "F5", Pitch = pitch });
+            };
             Action<PF23> finishF23 = f =>
             {
                 int no = (int)f.Vals[0][0];
@@ -699,6 +771,24 @@ namespace SetPressCam
                 if (body == "") continue;
                 string c = body.Replace(" ", "");
                 System.Text.RegularExpressions.Match m;
+                if (exp != null && exp.Macro == "F5")
+                {
+                    int step = exp.Vals.Count;
+                    if (step == 0)
+                    {
+                        m = RE_XY.Match(c);
+                        if (!m.Success) { err(line, "中心の X Y を書いてください（例: X50 Y20）"); exp = null; continue; }
+                        exp.Vals.Add(new[] { PNum(m.Groups[1].Value), PNum(m.Groups[2].Value) });
+                    }
+                    else
+                    {
+                        m = RE_N.Match(c);
+                        if (!m.Success) { err(line, new[] { "直径", "ピッチ", "金型直径", "板厚" }[step - 1] + "を数字で書いてください"); exp = null; continue; }
+                        exp.Vals.Add(new[] { PNum(m.Groups[1].Value) });
+                    }
+                    if (exp.Vals.Count == 5) { finishF5(exp); exp = null; }
+                    continue;
+                }
                 if (exp != null)
                 {
                     int step = exp.Vals.Count;
@@ -771,6 +861,11 @@ namespace SetPressCam
                         if (mac == null) err(line, "F" + Js.Num(f) + " は F100〜F110 の中に書いてください");
                         exp = new PExp { Macro = f == 13 ? "F13" : "F3", Line = line, Tool = tool, Mac = mac };
                     }
+                    else if (f == 5)
+                    {
+                        if (mac == null) err(line, "F5 は F100〜F110 の中に書いてください");
+                        exp = new PExp { Macro = "F5", Line = line, Tool = tool, Mac = mac };
+                    }
                     else if (f >= 100 && f <= 109)
                     {
                         if (mac != null) err(line, "F110 でマクロ " + mac.No + " を閉じてから書いてください");
@@ -787,7 +882,7 @@ namespace SetPressCam
                         if (mac != null) err(line, "F23 は F110 のあとに書いてください");
                         f23 = new PF23 { Line = line };
                     }
-                    else err(line, "F" + Js.Num(f) + " はここでは使えません（F3・F13・F23・F100〜F110）");
+                    else err(line, "F" + Js.Num(f) + " はここでは使えません（F3・F5・F13・F23・F100〜F110）");
                 }
                 else if ((m = RE_XY.Match(c)).Success)
                 {
@@ -845,7 +940,8 @@ namespace SetPressCam
             }
             if (r.Errs.Count > 0) return new CodePlan { Errs = r.Errs.OrderBy(e => e.Line).ToList() };
             Func<Hit, Hit, bool> sameHit = (a, b) => MacroOf(a) == MacroOf(b) && a.Tool == b.Tool && NearC(a.X0, b.X0) && NearC(a.Y0, b.Y0)
-                && NearC(a.X1, b.X1) && NearC(a.Y1, b.Y1) && (a.Tool == null || MacroOf(a) != "F13" || NearC(a.Mj ?? 0, b.Mj ?? 0));
+                && NearC(a.X1, b.X1) && NearC(a.Y1, b.Y1) && (a.Tool == null || MacroOf(a) != "F13" || NearC(a.Mj ?? 0, b.Mj ?? 0))
+                && (MacroOf(a) != "F5" || NearC(a.Pitch ?? 0, b.Pitch ?? 0));
             var plans = new List<Tuple<int, Layout>>();
             for (int k = 0; k < Info.Outers.Count; k++)
             {
@@ -864,6 +960,7 @@ namespace SetPressCam
                     {
                         var h = new Hit { Tool = q.Tool, X0 = Round(q.X0 + o.X), Y0 = Round(q.Y0 + o.Y), X1 = Round(q.X1 + o.X), Y1 = Round(q.Y1 + o.Y), Macro = q.Macro };
                         if (q.Macro == "F13") h.Mj = q.Mj;
+                        if (q.Macro == "F5") h.Pitch = Round(q.Pitch);
                         var was = oldHits.Find(x => sameHit(x, h));
                         if (was != null && was.Kind != null) h.Kind = was.Kind;  // 切り欠きの印は、同じ所を抜くものに残す
                         hits.Add(h);
@@ -939,14 +1036,14 @@ namespace SetPressCam
                 add("", null, false);
                 add("; S" + (k + 1) + " 割付  T → F100〜F110 でマクロに登録 → F23 で配置。F3: 開始点（左上）→ XY 寸法 → 金型 XY 寸法", null, true);
                 if (lay.Src != HoleSrc(k.Value)) add("; ※ 割付のあとで図形が変わりました。もう一度自動割付してください", null, true);
-                // 合う丸の金型がなくて抜いていない丸穴
+                // 抜ける丸の金型がなくて抜いていない丸穴
                 var unp = CirclesOf(k.Value).Where(c =>
                 {
                     var p = P(c.C);
-                    return !hs.Any(h => RoundHit(h) && NearC(Doc.Tools[h.Tool.Value].D ?? 0, c.D) && NearC((h.X0 + h.X1) / 2, p.X) && NearC((h.Y0 + h.Y1) / 2, p.Y));
+                    return !hs.Any(h => CircleHit(h) && NearC(h.X1 - h.X0, c.D) && NearC((h.X0 + h.X1) / 2, p.X) && NearC((h.Y0 + h.Y1) / 2, p.Y));
                 }).ToList();
                 foreach (var dd in unp.Select(c => c.D).Distinct())
-                    add("; ※ 丸穴 φ" + Fmt(dd) + "（" + unp.Count(c => c.D == dd) + " 個）は、合う丸の金型がないので抜いていません", null, true);
+                    add("; ※ 丸穴 φ" + Fmt(dd) + "（" + unp.Count(c => c.D == dd) + " 個）は、抜ける丸の金型がないので抜いていません", null, true);
                 if (hs.Count == 0) { add("; 抜く所がありません", null, true); continue; }
                 // F23 のピッチ（書き換えていなければ 金型が抜く形を囲む四角 + 10 mm）と列数
                 var f = F23Of(lay);
@@ -981,6 +1078,18 @@ namespace SetPressCam
                         string hk = HitKey(lay.Work, i);
                         bool f13 = MacroOf(h) == "F13";
                         bool single = MacroOf(h) == "単発";
+                        if (MacroOf(h) == "F5")
+                        {
+                            madd("; " + (i + 1) + "  丸穴 φ" + Fmt(Round(h.X1 - h.X0)) + "  F5 追い抜き: 中心 XY → 直径 → ピッチ（円同士の直線距離）→ 金型直径 → 板厚", hk, true);
+                            madd("F5", hk, false);
+                            add(mxy((h.X0 + h.X1) / 2 - o.X, o.Y - (h.Y0 + h.Y1) / 2, "中心"), hk, false);
+                            Action<double, string> nl = (v, note) => add("    " + Fmt(v).PadRight(16) + "; " + note, hk, false);
+                            nl(Round(h.X1 - h.X0), "直径");
+                            nl(h.Pitch ?? 0, "ピッチ");
+                            nl(t != null ? t.D ?? 0 : 0, "金型直径");
+                            nl(NibbleT(), Doc.Sheet.T != null ? "板厚" : "板厚（未設定なので 1.6）");
+                            continue;
+                        }
                         madd(f13 ? "; " + (i + 1) + " 外形  F13: 開始点（左上）→ 外形 XY → 金型 XY → 角 R（金型寸法のぶん外側）"
                             : "; " + (i + 1) + (h.Kind == "notch" ? " 切り欠き" : "") + (RoundHit(h) ? "  丸穴 φ" + Fmt(t.D ?? 0) : "") + (single ? "  単発: 金型の中心" : ""), hk, true);
                         if (f13)
