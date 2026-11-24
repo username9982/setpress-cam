@@ -2,7 +2,7 @@
 
 割付・コードの作り方（`geom.js` / `app.js`）を変えたら、Windows 版（`Geom.cs` / `Editor*.cs`）にも同じ変更を入れて、次の手順で同じ結果になるか確かめる。
 
-1. 確かめるための図面を作る（holes、notches、L、blocked、overlap、slot、mj-rect、mj-rect-tall、decimal、no-tools、circles、nibble、nibble-thick、round-outer、round-outer-2）
+1. 確かめるための図面を作る（holes、notches、L、blocked、overlap、slot、mj-rect、mj-rect-tall、decimal、no-tools、circles、nibble、nibble-thick、round-outer、round-outer-2、x-min）
 
    ```
    python windows/tests/make_cases.py
@@ -35,4 +35,5 @@ v0.17.11 では、10 個の図面すべてでコード 449 行が一致した（
 v0.17.12 では、F3・F13・単発・T・F23・プログラム番号を書き換えたもの、誤りのあるもの、ワークを消したものなど 116 通りの書き換えで、反映の結果（作り直したコード・割付・寸法・誤りの一覧）がすべて一致した。
 v0.18.0 では、丸穴の図面（circles）を加えた 11 個の図面でコード 515 行が一致し、丸穴の単発を書き換えるなど 6 通りの書き換えの反映もすべて一致した。
 v0.19.0 では、丸の追い抜き（F5）の図面（nibble、nibble-thick）を加えた 13 個の図面でコード 618 行と割り付けた図面が一致し、F5 のピッチ・直径・金型直径・板厚を書き換えたものや誤りのあるものなど 16 通りの書き換えの反映もすべて一致した。
-v0.20.0 では、丸の外形の図面（round-outer、round-outer-2）を加えた 15 個の図面でコード 780 行と割り付けた図面が一致し、すべての図面のコードをそのまま反映すると SAME、丸の外形の F5 のピッチを書き換えたものとピッチが小さすぎるものの反映も一致した。
+v0.20.0 では、丸の外形の図面（round-outer、round-outer-2、x-min）を加えた 15 個の図面でコード 780 行と割り付けた図面が一致し、すべての図面のコードをそのまま反映すると SAME、丸の外形の F5 のピッチを書き換えたものとピッチが小さすぎるものの反映も一致した。
+v0.20.1 では、X20 の注意を確かめる図面（x-min）を加えた 16 個の図面でコード 825 行と割り付けた図面が一致した。

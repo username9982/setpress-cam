@@ -638,6 +638,7 @@ namespace SetPressCam
                 if (used.Count > 0) summary += "\r\n金型 " + string.Join("、", used.Select(t => "T" + (t + 1) + " " + Model.ToolText(Doc.Tools[t])));
                 warn.AddRange(lay.Warn);
                 if (lay.Src != HoleSrc(k)) warn.Add("割付のあとで図形が変わりました。もう一度「自動割付」を押してください。");
+                if (MinToolX(lay) < X_MIN - 1e-6) warn.Add(XMinWarn(MinToolX(lay)));
             }
             else
             {
@@ -657,6 +658,27 @@ namespace SetPressCam
         public const int F23_MAX = 99;
 
         public class F23Info { public double X0, Y0, X1, Y1, Px, Py; public int Nx, Ny; }
+
+        /// <summary>機械の X は 20 mm より左（板の左端寄り）が危険。</summary>
+        public const double X_MIN = 20;
+
+        /// <summary>いちばん左を抜く金型の中心の X（板の原点から）。どの割付も、抜く範囲の左端 + 金型の幅の半分（丸は半径）が
+        /// いちばん左の中心（F3・F13 は金型を範囲の内側で送り、F5 は金型の中心が 直径 − 金型直径 の円を回る）。
+        /// 多数個取りは右へ並べるので、1 個目がいちばん左</summary>
+        public double MinToolX(Layout lay)
+        {
+            double m = double.PositiveInfinity;
+            foreach (var h in HitsOf(lay))
+            {
+                var t = ToolOf(h);
+                if (t == null) continue;
+                double half = t.Shape == "round" ? (t.D ?? 0) / 2 : (t.W ?? 0) / 2;
+                m = Math.Min(m, Round(h.X0 + half));
+            }
+            return m;
+        }
+
+        public static string XMinWarn(double x) { return "いちばん左を抜く金型の中心が X" + Fmt(x) + " です。X" + Js.Num(X_MIN) + " より左は危険なので、ワークを右へ動かしてください。"; }
 
         public F23Info F23Of(Layout lay)
         {
@@ -1104,6 +1126,7 @@ namespace SetPressCam
                 var f = F23Of(lay);
                 if (f.X0 < -1e-6 || f.Y1 > Doc.Sheet.H + 1e-6 || f.X1 + (f.Nx - 1) * f.Px > Doc.Sheet.W + 1e-6 || f.Y0 - (f.Ny - 1) * f.Py < -1e-6)
                     add("; ※ 多数個取りの並びが板からはみ出します", null, true);
+                if (MinToolX(lay) < X_MIN - 1e-6) add("; ※ " + XMinWarn(MinToolX(lay)), null, true);
                 // ピッチを抜く形より狭めて重ねるのは、材料を節約するためにわざとすることがあるので注意しない（プレビューで目で確かめる）
                 bool pitchAuto = lay.Px == null && lay.Py == null;
                 Func<double, double, string, string, string> xyi = (x, y, note, ind) => ind + ("X" + Fmt(x)).PadRight(8) + ("Y" + Fmt(y)).PadRight(8) + "; " + note;

@@ -145,6 +145,11 @@ def cases():
     d.circle(200, 200, 40)
     d.circle(500, 200, 60)
     out.append(d)
+    # 15: 板の左端の近く。長方形は F13 の金型の中心がちょうど X20（注意しない）、丸の外形は X20 より左（注意する）
+    d = Doc('x-min', [rect_tool(20, 10), {'shape': 'round', 'w': None, 'h': None, 'd': 12, 'note': ''}, NONE])
+    d.rect(30, 100, 100, 200)
+    d.circle(40, 350, 50)
+    out.append(d)
     # 12: 板厚 12（10 mm を超えるので追い抜きできない）
     d = Doc('nibble-thick', [{'shape': 'round', 'w': None, 'h': None, 'd': 12, 'note': ''}, NONE, NONE])
     d.d['sheet']['t'] = 12

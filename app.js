@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.20.0';
+const APP_VERSION = '0.20.1';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1910,6 +1910,7 @@ function updateLayoutPanel() {
       if (used.length) summary += `\n金型 ${used.map((t) => `T${t + 1} ${toolText(doc.tools[t])}`).join('、')}`;
       warn.push(...lay.warn);
       if (lay.src !== holeSrc(k)) warn.push('割付のあとで図形が変わりました。もう一度「自動割付」を押してください。');
+      if (minToolX(lay) < X_MIN - 1e-6) warn.push(xMinWarn(minToolX(lay)));
     } else {
       summary += '\nまだ割り付けていません';
     }
@@ -2053,6 +2054,21 @@ function f23Fields(q) {
   for (const f of ['px', 'py']) { const v = f23Pitch(q[f]); if (v != null) r[f] = v; }
   return r;
 }
+// 機械の X は 20 mm より左（板の左端寄り）が危険。いちばん左を抜く金型の中心の X（板の原点から）。
+// どの割付も、抜く範囲の左端 + 金型の幅の半分（丸は半径）がいちばん左の中心（F3・F13 は金型を範囲の内側で送り、
+// F5 は金型の中心が 直径 − 金型直径 の円を回る）。多数個取りは右へ並べるので、1 個目がいちばん左
+const X_MIN = 20;
+function minToolX(lay) {
+  let m = Infinity;
+  for (const h of hitsOf(lay)) {
+    const t = h.tool == null ? null : doc.tools[h.tool];
+    if (!t) continue;
+    const half = t.shape === 'round' ? (t.d || 0) / 2 : (t.w || 0) / 2;
+    m = Math.min(m, round(h.x0 + half));
+  }
+  return m;
+}
+const xMinWarn = (x) => `いちばん左を抜く金型の中心が X${fmt(x)} です。X${X_MIN} より左は危険なので、ワークを右へ動かしてください。`;
 function f23Of(lay) {
   const hs = hitsOf(lay);
   const x0 = hs.length ? Math.min(...hs.map((h) => h.x0)) : 0, x1 = hs.length ? Math.max(...hs.map((h) => h.x1)) : 0;
@@ -2388,6 +2404,7 @@ function genCode() {
     const f = f23Of(lay);
     if (f.x0 < -1e-6 || f.y1 > doc.sheet.h + 1e-6 || f.x1 + (f.nx - 1) * f.px > doc.sheet.w + 1e-6 || f.y0 - (f.ny - 1) * f.py < -1e-6)
       add('; ※ 多数個取りの並びが板からはみ出します', null, true);
+    if (minToolX(lay) < X_MIN - 1e-6) add(`; ※ ${xMinWarn(minToolX(lay))}`, null, true);
     // ピッチを抜く形より狭めて重ねるのは、材料を節約するためにわざとすることがあるので注意しない（プレビューで目で確かめる）
     const pitchAuto = lay.px == null && lay.py == null;
     const xy = (x, y, note, ind = '  ') => `${ind}${('X' + fmt(x)).padEnd(8)}${('Y' + fmt(y)).padEnd(8)}; ${note}`;
