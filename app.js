@@ -3,7 +3,7 @@
 // セットプレス CAM — 図形を描いて寸法を決める画面。図形のデータと解き方は geom.js。
 // 座標はすべて mm。内部では板の左下を (0, 0)、Y を上向きに持ち、表示は外形ごとのワーク原点（外形の左上、Y は下へ正）からの値にする。
 
-const APP_VERSION = '0.19.0';
+const APP_VERSION = '0.19.1';
 const STORE_KEY = 'setpress-cam:drawings';   // 保存した図面 { 名前: {savedAt, doc} }
 const CURRENT_KEY = 'setpress-cam:current';  // 作業中の図面（自動保存）
 const UNDO_KEY = 'setpress-cam:undo';  // 作業中の図面の「元に戻す」の履歴（再読み込みしても戻せるように）
@@ -1529,13 +1529,16 @@ function pickNibble(d) {
 // 丸穴を抜く割付（単発か追い抜き）か
 const nibbleHit = (h) => macroOf(h) === 'F5' && h.tool != null && doc.tools[h.tool] && doc.tools[h.tool].shape === 'round';
 const circleHit = (h) => roundHit(h) || nibbleHit(h);
-// 追い抜きで金型が抜く位置（金型の中心）。ピッチごとに円周上に並べる（描くため。機械と同じ並びとはかぎらない）
+// 追い抜き（F5）で金型が抜く位置（金型の中心）。機械と同じく、中心の真上から時計回りに、ピッチ（円同士の直線距離）
+// ごとに抜く。1 周したところで止めるので、最後の 1 つと最初の間はピッチより狭くなる
 function nibblePoints(h) {
   const t = doc.tools[h.tool];
   const cx = (h.x0 + h.x1) / 2, cy = (h.y0 + h.y1) / 2, rho = (h.x1 - h.x0 - t.d) / 2;
   if (!(rho > 0) || !(h.pitch > 0)) return [];
-  const n = Math.min(2000, Math.max(3, Math.ceil(Math.PI / Math.asin(Math.min(1, h.pitch / (2 * rho))))));
-  return Array.from({ length: n }, (v, i) => [cx + rho * Math.cos(2 * Math.PI * i / n), cy + rho * Math.sin(2 * Math.PI * i / n)]);
+  const step = 2 * Math.asin(Math.min(1, h.pitch / (2 * rho)));  // 1 回ごとに回る角度
+  const n = Math.min(2000, Math.ceil(2 * Math.PI / step - 1e-9));
+  // Y は上へ正。真上から時計回り（右 → 下 → 左）
+  return Array.from({ length: n }, (v, i) => [cx + rho * Math.sin(i * step), cy + rho * Math.cos(i * step)]);
 }
 // 長方形の金型（番号）のうち、w × h の長方形に入るいちばん大きいもの
 function pickRectTool(w, h) {

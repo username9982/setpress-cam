@@ -193,15 +193,18 @@ namespace SetPressCam
         /// <summary>丸穴を抜く割付（単発か追い抜き）か</summary>
         public bool CircleHit(Hit h) { return RoundHit(h) || NibbleHit(h); }
 
-        /// <summary>追い抜きで金型が抜く位置（金型の中心）。ピッチごとに円周上に並べる（描くため。機械と同じ並びとはかぎらない）</summary>
+        /// <summary>追い抜き（F5）で金型が抜く位置（金型の中心）。機械と同じく、中心の真上から時計回りに、ピッチ（円同士の直線距離）
+        /// ごとに抜く。1 周したところで止めるので、最後の 1 つと最初の間はピッチより狭くなる</summary>
         public List<V> NibblePoints(Hit h)
         {
             var output = new List<V>();
             var t = Doc.Tools[h.Tool.Value];
             double cx = (h.X0 + h.X1) / 2, cy = (h.Y0 + h.Y1) / 2, rho = (h.X1 - h.X0 - (t.D ?? 0)) / 2, pitch = h.Pitch ?? 0;
             if (!(rho > 0) || !(pitch > 0)) return output;
-            int n = (int)Math.Min(2000, Math.Max(3, Math.Ceiling(Math.PI / Math.Asin(Math.Min(1, pitch / (2 * rho))))));
-            for (int i = 0; i < n; i++) output.Add(new V(cx + rho * Math.Cos(2 * Math.PI * i / n), cy + rho * Math.Sin(2 * Math.PI * i / n)));
+            double step = 2 * Math.Asin(Math.Min(1, pitch / (2 * rho)));  // 1 回ごとに回る角度
+            int n = (int)Math.Min(2000, Math.Ceiling(2 * Math.PI / step - 1e-9));
+            // Y は上へ正。真上から時計回り（右 → 下 → 左）
+            for (int i = 0; i < n; i++) output.Add(new V(cx + rho * Math.Sin(i * step), cy + rho * Math.Cos(i * step)));
             return output;
         }
 
